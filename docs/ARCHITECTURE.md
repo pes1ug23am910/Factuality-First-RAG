@@ -1,6 +1,6 @@
 # Architecture — Factuality-First RAG
 
-> Version 0.2.0 · February 2026 (Session 2)
+> Version 0.3.0 · March 2026 (Session 3)
 
 ---
 
@@ -92,6 +92,15 @@ factuality_rag/
 │
 └── experiment_runner.py ─ Reproducibility layer
                           Metadata tracking, run persistence
+
+scripts/               ─── Analysis & experiment tooling (NEW v0.3)
+├── build_corpus.py        Wikipedia ingestion + index building
+├── analyze_gating.py      Phase 4A gating oracle analysis
+├── analyze_scorer.py      Phase 4B scorer AUC analysis
+├── analyze_errors.py      Phase 4C error taxonomy
+├── tune_scorer_weights.py Phase 5A-3 weight grid search
+├── aggregate_results.py   Cross-seed metric aggregation
+└── bootstrap_test.py      Paired bootstrap significance test
 ```
 
 ---
@@ -151,9 +160,11 @@ Wikipedia Dump ──▶ WikiChunker ──▶ wiki_chunks.jsonl
 3. Compute **logit gap** $\Delta = \text{logit}_1 - \text{logit}_2$ (top-2 difference).
 4. Decision: `retrieve = (H > entropy_thresh) OR (Δ < logit_gap_thresh)`.
 
-**Temperature calibration:** Grid search over $T \in [0.5, 3.0]$ to minimise ECE on dev set.
+**Multi-token probe (new in v0.3):** When `probe_tokens > 1`, the probe runs an autoregressive loop over k positions (greedy argmax at each step), computing entropy and logit gap at each position. The final decision uses the *averaged* entropy and logit gap across all k positions. This produces a more stable gating signal — first-token entropy is noisy for factoid queries; averaging over 3-5 positions significantly reduces false skips.
 
-**Cost:** One forward pass (no autoregressive decoding). For a 7B model, this is ~50ms on A100.
+**Real ECE calibration (v0.3):** `calibrate_temperature()` now uses binned Expected Calibration Error (Guo et al., 2017) instead of the earlier entropy std-dev proxy. `compute_ece(confidences, accuracies, n_bins=15)` partitions [0,1] into equal bins and computes the weighted average of |avg_confidence − avg_accuracy| per bin. Temperature $T$ is chosen to minimise ECE on the dev set.
+
+**Cost:** Single-token: ~50ms on A100. Multi-token (k=3): ~150ms — still cheap compared to retrieval.
 
 ```
 Input prompt
@@ -206,6 +217,14 @@ Default $\alpha = 0.6$ (tunable in config).
 $$\text{final\_score} = w_{\text{nli}} \cdot P(\text{ent}) + w_{\text{overlap}} \cdot \text{overlap} + w_{\text{ret}} \cdot \text{ret\_norm}$$
 
 **Filtering:** Passages with `final_score < threshold` (default 0.4) are dropped before generation.
+
+**Sentence-level NLI (v0.3):** When `nli_mode="sentence"`, the scorer splits each passage into individual sentences (regex-based with abbreviation handling) and scores each sentence independently via NLI. The passage receives the *maximum* sentence-level entailment score. This addresses the issue where a passage with one highly relevant sentence surrounded by irrelevant content would score low at the passage level.
+
+**Cross-encoder reranking (v0.3):** When `cross_encoder_model` is set (e.g., `"cross-encoder/ms-marco-MiniLM-L-12-v2"`), a cross-encoder reranking stage runs *before* NLI scoring. The cross-encoder attends jointly to query and passage, producing more accurate relevance scores than bi-encoder retrieval. Passages are re-sorted by cross-encoder score and only the top-k are passed to NLI, reducing computational cost.
+
+```
+Retrieve top-20 (bi-encoder) → Cross-encoder rerank → Take top-10 → NLI scorer
+```
 
 ### 4.4 Generator
 
@@ -282,6 +301,18 @@ result2 = pipe.run("Who discovered gravity?")  # reuses same models
 
 > **Note:** Gating-skipped queries now receive `"medium"` (not `"high"`) because we cannot verify factuality without passages.
 
+**Real provenance mapping (v0.3):** The `_build_provenance()` function uses the `details` list from `compute_factscore()` to build a real claim-to-passage mapping. For each supported claim, it records which passage(s) provided entailment. This replaces the mock provenance structure and enables provenance precision computation.
+
+```python
+provenance = {
+    "0": ["doc_42"],   # Claim 0 supported by passage doc_42
+    "2": ["doc_17"],   # Claim 2 supported by passage doc_17
+    # Claim 1 was unsupported — absent from provenance
+}
+```
+
+**Config wiring (v0.3):** `nli_mode` and `cross_encoder_model` from YAML config are now passed through to the `PassageScorer` constructor in both `run_pipeline()` and `Pipeline.__init__()`.
+
 ### 4.7 Evaluation & FactScore
 
 **Claim decomposition:** `decompose_claims(answer)` splits answer into atomic claims via regex sentence splitting (handles abbreviations like Mr., Dr., U.S., etc.).
@@ -357,7 +388,7 @@ Mock mode is a first-class design concern, not an afterthought:
 - Deterministic outputs (same seed → same results).
 - No network calls (no HuggingFace Hub downloads).
 - No GPU required.
-- All tests pass in < 2 seconds.
+- All 79 tests pass in < 15 seconds.
 
 **Where mock is applied:**
 
