@@ -1,0 +1,39 @@
+# ──────────────────────────────────────────────────────────────
+# Baseline B1 — Closed-book (no retrieval)
+# ──────────────────────────────────────────────────────────────
+
+seed: 42
+
+models:
+  generator: "mistralai/Mistral-7B-Instruct-v0.3"
+
+data:
+  datasets:
+    - name: "natural_questions"
+      split: "validation"
+  dev_sample_size: 500
+
+# Disable gating and retrieval entirely
+gating:
+  enabled: false
+
+retriever:
+  top_k: 0              # no retrieval
+  alpha: 0.6
+  normalize: true
+
+scorer:
+  weights:
+    w_nli: 0.5
+    w_overlap: 0.2
+    w_ret: 0.3
+  score_threshold: 0.4
+
+pipeline:
+  mock_mode: false
+  runs_dir: "runs"
+
+eval:
+  metrics:
+    - exact_match
+    - f1
