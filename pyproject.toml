@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "factuality_rag"
-version = "0.1.0"
+version = "0.3.0"
 description = "Factuality-first RAG: adaptive retrieval gating + passage-level provenance/factuality scoring"
 readme = "README.md"
 license = {text = "MIT"}
