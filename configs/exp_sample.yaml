@@ -1,0 +1,81 @@
+# ──────────────────────────────────────────────────────────────
+# Factuality-first RAG – sample experiment configuration
+# ──────────────────────────────────────────────────────────────
+
+seed: 42
+
+# ── Models ────────────────────────────────────────────────────
+models:
+  dense_embedder: "sentence-transformers/all-mpnet-base-v2"
+  dpr_encoder: "facebook/dpr-question_encoder-single-nq-base"
+  nli_verifier: "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli"
+  generator: "mistral-7b-instruct"          # placeholder
+
+# ── Data ──────────────────────────────────────────────────────
+data:
+  wiki_corpus: "data/wiki_chunks.jsonl"      # path to chunked corpus
+  datasets:
+    - name: "natural_questions"
+      split: "train"
+    - name: "hotpot_qa"
+      config: "fullwiki"
+      split: "train"
+    - name: "fever"
+      config: "v1.0"
+      split: "train"
+    - name: "trivia_qa"
+      config: "rc"
+      split: "train"
+    - name: "EleutherAI/truthful_qa_mc"
+      split: "validation"
+  dev_sample_size: 50                        # limit for quick dev runs
+
+# ── Wiki chunker ──────────────────────────────────────────────
+chunker:
+  chunk_size: 200        # tokens per chunk
+  chunk_overlap: 50      # overlapping tokens between consecutive chunks
+  dry_run: false
+
+# ── Index ─────────────────────────────────────────────────────
+index:
+  faiss_out: "indexes/faiss.index"
+  pyserini_out: "indexes/pyserini_dir"
+  faiss_type: "hnsw_flat"                    # hnsw_flat | ivfpq
+  hnsw_m: 32
+  hnsw_ef_construction: 200
+
+# ── Retriever ─────────────────────────────────────────────────
+retriever:
+  alpha: 0.6                                  # dense weight
+  normalize: true
+  top_k: 10
+  rerank: true
+
+# ── Gating ────────────────────────────────────────────────────
+gating:
+  enabled: true
+  entropy_thresh: 1.2
+  logit_gap_thresh: 2.0
+  probe_tokens: 1
+  calibration_temp: 1.0
+
+# ── Scorer ────────────────────────────────────────────────────
+scorer:
+  overlap_metric: "token"                     # token | char
+  weights:
+    w_nli: 0.5
+    w_overlap: 0.2
+    w_ret: 0.3
+  score_threshold: 0.4                        # passages below this are dropped
+
+# ── Pipeline ──────────────────────────────────────────────────
+pipeline:
+  mock_mode: false
+  runs_dir: "runs"
+
+# ── Evaluation ────────────────────────────────────────────────
+eval:
+  metrics:
+    - exact_match
+    - f1
+    - factscore_stub

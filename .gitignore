@@ -1,0 +1,90 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ========================
+# IDE & Editors
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ========================
+# OS artifacts
+# ========================
+Thumbs.db
+.DS_Store
+Desktop.ini
+ehthumbs.db
+
+# ========================
+# Testing & Coverage
+# ========================
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ========================
+# Generated indexes (large, reproducible)
+# ========================
+indexes/
+
+# ========================
+# Generated data & experiment outputs
+# ========================
+data/wiki_chunks.jsonl
+data/*.jsonl
+runs/
+results/
+outputs/
+logs/
+
+# ========================
+# Downloaded models & caches (NEVER commit)
+# ========================
+models/
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.onnx
+*.h5
+huggingface_cache/
+.cache/
+
+# ========================
+# Jupyter / notebook artifacts
+# ========================
+.ipynb_checkpoints/
+*.ipynb
+
+# ========================
+# Secrets & credentials
+# ========================
+.env
+*.key
+*.pem

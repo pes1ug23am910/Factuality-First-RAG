@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factuality_rag"
+version = "0.1.0"
+description = "Factuality-first RAG: adaptive retrieval gating + passage-level provenance/factuality scoring"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [{name = "Yash Verma"}]
+keywords = ["rag", "factuality", "retrieval", "nlp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "datasets>=2.0",
+    "transformers>=4.0",
+    "sentence-transformers",
+    "faiss-cpu",
+    "pyserini",
+    "scikit-learn",
+    "pyyaml",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+gpu = [
+    "faiss-gpu",
+]
+
+[project.scripts]
+factuality-rag = "factuality_rag.cli.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["factuality_rag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: marks tests that require real models / GPU (deselect with '-m \"not integration\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
