@@ -195,20 +195,22 @@ def run_pipeline(
         passages = _retriever.retrieve(query, k=k, rerank=ret_cfg.get("rerank", True))
 
     # ── 3. Scoring ────────────────────────────────────────────
+    scorer_cfg = cfg.get("scorer", {})
+    weights = scorer_cfg.get("weights", {})
+    _scorer = scorer or PassageScorer(
+        nli_model_hf=cfg.get("models", {}).get(
+            "nli_verifier",
+            "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli",
+        ),
+        overlap_metric=scorer_cfg.get("overlap_metric", "token"),
+        mock_mode=mock_mode,
+        w_nli=weights.get("w_nli", 0.5),
+        w_overlap=weights.get("w_overlap", 0.2),
+        w_ret=weights.get("w_ret", 0.3),
+        nli_mode=scorer_cfg.get("nli_mode", "passage"),
+        cross_encoder_model=scorer_cfg.get("cross_encoder_model", None),
+    )
     if passages:
-        scorer_cfg = cfg.get("scorer", {})
-        weights = scorer_cfg.get("weights", {})
-        _scorer = scorer or PassageScorer(
-            nli_model_hf=cfg.get("models", {}).get(
-                "nli_verifier",
-                "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli",
-            ),
-            overlap_metric=scorer_cfg.get("overlap_metric", "token"),
-            mock_mode=mock_mode,
-            w_nli=weights.get("w_nli", 0.5),
-            w_overlap=weights.get("w_overlap", 0.2),
-            w_ret=weights.get("w_ret", 0.3),
-        )
         passages = _scorer.score_passages(query, passages)
 
     # ── 4. Filter ─────────────────────────────────────────────
@@ -225,9 +227,7 @@ def run_pipeline(
     answer = _gen.generate(query, context=context)
 
     # ── 6. Provenance & confidence ────────────────────────────
-    provenance: Dict[str, Any] = {
-        str(i): [p["id"]] for i, p in enumerate(trusted)
-    }
+    provenance = _build_provenance(answer, trusted, _scorer)
 
     confidence_tag = _compute_confidence(trusted, retrieval_needed, gate)
 
@@ -270,6 +270,53 @@ def _compute_confidence(
     elif avg_score >= 0.45:
         return "medium"
     return "low"
+
+
+def _build_provenance(
+    answer: str,
+    trusted: List[Dict[str, Any]],
+    scorer: Any,
+) -> Dict[str, Any]:
+    """Build real claim → passage provenance mapping.
+
+    Uses :func:`~factuality_rag.eval.metrics.compute_factscore` to
+    decompose the answer into claims and match each claim to its
+    best-supporting passage via the scorer's NLI function.
+
+    Args:
+        answer: Generated answer string.
+        trusted: List of trusted passage dicts.
+        scorer: :class:`~factuality_rag.scorer.passage.PassageScorer`
+                instance (used for its ``_nli_entailment`` method).
+
+    Returns:
+        Dict mapping ``{claim_index: [best_passage_id]}``.
+
+    Example::
+
+        >>> from factuality_rag.scorer.passage import PassageScorer
+        >>> s = PassageScorer("mock", mock_mode=True)
+        >>> prov = _build_provenance("Hello.", [{"id":"0","text":"hi"}], s)
+        >>> isinstance(prov, dict)
+        True
+    """
+    if not trusted or not answer:
+        return {}
+
+    from factuality_rag.eval.metrics import compute_factscore
+
+    result = compute_factscore(
+        answer,
+        trusted,
+        nli_fn=scorer._nli_entailment,
+    )
+
+    provenance: Dict[str, Any] = {}
+    for i, detail in enumerate(result.get("details", [])):
+        pid = detail.get("best_passage_id")
+        provenance[str(i)] = [pid] if pid is not None else []
+
+    return provenance
 
 
 # ── Pipeline class (reusable, loads components once) ─────────
@@ -357,6 +404,8 @@ class Pipeline:
             w_nli=weights.get("w_nli", 0.5),
             w_overlap=weights.get("w_overlap", 0.2),
             w_ret=weights.get("w_ret", 0.3),
+            nli_mode=scorer_cfg.get("nli_mode", "passage"),
+            cross_encoder_model=scorer_cfg.get("cross_encoder_model", None),
         )
 
         self.generator = Generator(

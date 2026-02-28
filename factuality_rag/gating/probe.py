@@ -24,6 +24,62 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ── Standalone ECE computation ────────────────────────────────
+
+
+def compute_ece(
+    confidences: np.ndarray,
+    accuracies: np.ndarray,
+    n_bins: int = 15,
+) -> float:
+    """Compute binned Expected Calibration Error (ECE).
+
+    Divides the confidence interval [0, 1] into *n_bins* equal-width
+    bins and computes::
+
+        ECE = Σ (|B_m| / N) · |avg_conf(B_m) - avg_acc(B_m)|
+
+    Args:
+        confidences: 1-D array of predicted confidences in [0, 1].
+        accuracies: 1-D array of binary accuracy labels (0 or 1).
+        n_bins: Number of bins (default 15).
+
+    Returns:
+        ECE value in [0, 1].
+
+    Example::
+
+        >>> import numpy as np
+        >>> # Perfect calibration → ECE = 0
+        >>> compute_ece(np.array([0.5, 0.5]), np.array([0.0, 1.0]))
+        0.0
+    """
+    if len(confidences) == 0:
+        return 0.0
+
+    bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    n = len(confidences)
+
+    for i in range(n_bins):
+        lo, hi = bin_boundaries[i], bin_boundaries[i + 1]
+        if i < n_bins - 1:
+            mask = (confidences >= lo) & (confidences < hi)
+        else:
+            # Last bin includes the right boundary
+            mask = (confidences >= lo) & (confidences <= hi)
+
+        bin_size = mask.sum()
+        if bin_size == 0:
+            continue
+
+        avg_conf = confidences[mask].mean()
+        avg_acc = accuracies[mask].mean()
+        ece += (bin_size / n) * abs(avg_conf - avg_acc)
+
+    return float(ece)
+
+
 class GatingProbe:
     """Single-step logit probe for adaptive retrieval gating.
 
@@ -96,6 +152,10 @@ class GatingProbe:
         entropy and logit-gap of the next-token distribution, and
         returns ``True`` (retrieve) when the model is uncertain.
 
+        When ``probe_tokens > 1``, the model autoregressively generates
+        *probe_tokens* positions and the entropy / logit-gap are
+        averaged across all positions.
+
         Decision rule::
 
             retrieve = (entropy > entropy_thresh) or (logit_gap < logit_gap_thresh)
@@ -118,9 +178,17 @@ class GatingProbe:
             >>> probe.should_retrieve("What is the capital of France?")
             True
         """
-        logits = self._get_next_token_logits(prompt, probe_tokens)
-        entropy = self._compute_entropy(logits)
-        logit_gap = self._compute_logit_gap(logits)
+        if probe_tokens > 1:
+            # Multi-token probe: average entropy and logit-gap over k positions
+            all_logits = self._get_multi_token_logits(prompt, probe_tokens)
+            entropies = [self._compute_entropy(lg) for lg in all_logits]
+            gaps = [self._compute_logit_gap(lg) for lg in all_logits]
+            entropy = float(np.mean(entropies))
+            logit_gap = float(np.mean(gaps))
+        else:
+            logits = self._get_next_token_logits(prompt, 1)
+            entropy = self._compute_entropy(logits)
+            logit_gap = self._compute_logit_gap(logits)
 
         should = entropy > entropy_thresh or logit_gap < logit_gap_thresh
         logger.debug(
@@ -184,11 +252,12 @@ class GatingProbe:
     # ── Internal helpers ──────────────────────────────────────
 
     def _get_next_token_logits(self, prompt: str, n: int = 1) -> np.ndarray:
-        """Forward pass → return logits for the next *n* token positions.
+        """Forward pass → return logits for the next token position.
 
         Args:
             prompt: Input text.
-            n: Number of token positions.
+            n: Ignored (kept for API compat). Use
+               :meth:`_get_multi_token_logits` for multi-position probing.
 
         Returns:
             1-D numpy array of logits (vocab-sized) for position -1.
@@ -207,6 +276,53 @@ class GatingProbe:
         # outputs.logits shape: (1, seq_len, vocab_size)
         logits = outputs.logits[0, -1, :].cpu().numpy()
         return logits
+
+    def _get_multi_token_logits(
+        self, prompt: str, k: int = 3
+    ) -> List[np.ndarray]:
+        """Autoregressive forward pass → logits for *k* token positions.
+
+        Generates *k* tokens one-by-one (greedy), collecting logits
+        at each step.  In mock-mode uses seeded RNG per step.
+
+        Args:
+            prompt: Input text.
+            k: Number of successive token positions to probe.
+
+        Returns:
+            List of *k* 1-D numpy logit arrays (vocab-sized).
+
+        Example::
+
+            >>> probe = GatingProbe("x", mock_mode=True)
+            >>> logits_list = probe._get_multi_token_logits("hello", k=3)
+            >>> len(logits_list)
+            3
+        """
+        if self.mock_mode:
+            results: List[np.ndarray] = []
+            for step in range(k):
+                seed = (abs(hash(prompt)) + step) % (2**31)
+                rng = np.random.RandomState(seed)
+                results.append(rng.randn(32000).astype(np.float32))
+            return results
+
+        self._load_model()
+        import torch
+
+        input_ids = self._tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        results_real: List[np.ndarray] = []
+
+        for _ in range(k):
+            with torch.no_grad():
+                outputs = self._model(input_ids)
+            logits = outputs.logits[0, -1, :]
+            results_real.append(logits.cpu().numpy())
+            # Greedily append the top token for next step
+            next_token = logits.argmax(dim=-1, keepdim=True).unsqueeze(0)
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+        return results_real
 
     def _compute_entropy(self, logits: np.ndarray) -> float:
         """Compute Shannon entropy of the softmax distribution.
@@ -251,8 +367,14 @@ class GatingProbe:
         top2 = np.partition(logits, -2)[-2:]
         return float(abs(top2[1] - top2[0]))
 
-    def _estimate_ece(self, prompts: List[str], n_bins: int = 10) -> float:
-        """Rough Expected Calibration Error estimate.
+    def _estimate_ece(self, prompts: List[str], n_bins: int = 15) -> float:
+        """Estimate Expected Calibration Error on a set of prompts.
+
+        Uses the maximum softmax probability as the confidence and
+        computes a binned ECE.  Since we lack true labels in the
+        unsupervised setting, we treat the top-1 prediction as
+        "correct" when the logit gap exceeds 2.0 (a proxy for
+        model certainty).
 
         Args:
             prompts: List of text prompts.
@@ -261,9 +383,19 @@ class GatingProbe:
         Returns:
             ECE estimate.
         """
-        # Simplified: average entropy as proxy
-        entropies = []
+        confidences = []
+        accuracies = []
         for p in prompts:
             logits = self._get_next_token_logits(p)
-            entropies.append(self._compute_entropy(logits))
-        return float(np.std(entropies))
+            scaled = logits / max(self.temp, 1e-8)
+            shifted = scaled - scaled.max()
+            probs = np.exp(shifted) / np.exp(shifted).sum()
+            conf = float(probs.max())
+            gap = self._compute_logit_gap(logits)
+            # Proxy accuracy: if the gap is large, the model is likely correct
+            acc = 1.0 if gap > 2.0 else 0.0
+            confidences.append(conf)
+            accuracies.append(acc)
+        return compute_ece(
+            np.array(confidences), np.array(accuracies), n_bins=n_bins
+        )
