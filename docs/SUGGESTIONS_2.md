@@ -1,5 +1,5 @@
 # Suggestions & Improvements — v0.2 → v1.0
-> Updated after Session 2. Items marked ✅ are complete.
+> Updated after Session 3. Items marked ✅ are complete.
 > Prioritised for remaining 3-month timeline (months 2–4).
 
 ---
@@ -29,6 +29,14 @@
 | Wikipedia HF ingestion | 2 | `load_from_hf(sample_size, output_path)` streaming |
 | CI/CD | 2 | GitHub Actions: pytest (mock only) + ruff + mypy on Python 3.10/3.11/3.12 |
 | Experiment configs | 2 | B1 (closed-book), B2 (always-RAG), full pipeline YAML configs |
+| Sentence-level NLI | 3 | `nli_mode="sentence"`, `_split_sentences()`, `_sentence_level_nli()` in `scorer/passage.py` |
+| Cross-encoder reranking | 3 | Optional `cross_encoder_model` param, `_cross_encoder_rerank()` in `scorer/passage.py` |
+| Real ECE calibration | 3 | `compute_ece()` module-level function in `gating/probe.py` (BUG-6 fix) |
+| Multi-token gating probe | 3 | `_get_multi_token_logits()` + averaged entropy/gap in `should_retrieve()` |
+| Real provenance mapping | 3 | `_build_provenance()` using `compute_factscore` details in `pipeline/orchestrator.py` (BUG-8 fix) |
+| Scorer weight tuning script | 3 | `scripts/tune_scorer_weights.py` — grid search over (w_nli, w_overlap, w_ret) |
+| Analysis scripts (7) | 3 | `scripts/analyze_gating.py`, `analyze_scorer.py`, `analyze_errors.py`, `aggregate_results.py`, `bootstrap_test.py`, `build_corpus.py` |
+| Experiment configs B3+B4 | 3 | `configs/exp_b3_gate_only.yaml`, `configs/exp_b4_score_only.yaml` |
 
 ---
 
@@ -51,9 +59,9 @@
 
 ---
 
-### 2. Sentence-Level NLI (P1)
+### 2. Sentence-Level NLI (P1) ✅
 
-**Status:** Not started
+**Status:** Completed in Session 3
 
 **Problem with current approach:**
 Passage-level NLI scores an entire 256-token passage as a single unit. A passage with one highly relevant sentence surrounded by irrelevant content may score low overall, causing the scorer to incorrectly filter it out. This is likely the biggest source of `SCORER_DROP` failures.
@@ -82,9 +90,9 @@ scorer:
 
 ---
 
-### 3. Provenance Mapping (P1 — BUG-8)
+### 3. Provenance Mapping (P1 — BUG-8) ✅
 
-**Status:** `provenance` dict returned by `run_pipeline()` is currently a mock structure (e.g., `{"0": ["doc_5"]}`). Real claim-to-passage mapping is not implemented.
+**Status:** Completed in Session 3 — `_build_provenance()` in `pipeline/orchestrator.py` uses `compute_factscore()` details.
 
 **Problem:** Without real provenance, you cannot compute provenance precision (key ablation metric) or show qualitative provenance examples in the paper.
 
@@ -105,9 +113,9 @@ for i, claim in enumerate(claims):
 
 ---
 
-### 4. Cross-Encoder Reranking (P2)
+### 4. Cross-Encoder Reranking (P2) ✅
 
-**Status:** Not started
+**Status:** Completed in Session 3 — optional `cross_encoder_model` param in `PassageScorer`, `_cross_encoder_rerank()` method.
 
 **Motivation:** Bi-encoder retrieval (FAISS) optimises recall, not precision. A cross-encoder attending to both query and passage jointly is significantly more accurate for reranking. Adding it before the NLI scorer reduces the number of passages the NLI model needs to process.
 
@@ -142,9 +150,9 @@ retriever:
 
 ---
 
-### 5. Learned Scorer Weights (P2)
+### 5. Learned Scorer Weights (P2) ✅ (script)
 
-**Status:** Not started. Fixed weights `w_nli=0.5, w_overlap=0.2, w_ret=0.3` are currently unmotivated.
+**Status:** Grid-search script created in Session 3 — `scripts/tune_scorer_weights.py`. Actual tuning requires Phase 3 experiment data.
 
 **Problem:** NLI and retrieval scores may be correlated (both measure relevance). Overlap is a weak proxy. The 0.5/0.2/0.3 split was chosen by intuition, not by data.
 
@@ -170,9 +178,9 @@ Train a binary classifier `(nli, overlap, ret) → relevant/irrelevant` on FEVER
 
 ---
 
-### 6. Real ECE Calibration for Gating (P2 — BUG-6)
+### 6. Real ECE Calibration for Gating (P2 — BUG-6) ✅
 
-**Status:** Current `calibrate_temperature()` uses entropy std-dev as an ECE proxy — this is not the same as Expected Calibration Error and produces unreliable temperature choices.
+**Status:** Completed in Session 3 — `compute_ece()` function in `gating/probe.py` with standard binned ECE (15 bins). `calibrate_temperature()` now uses real ECE.
 
 **Impact on paper:** If you claim "calibrated confidence estimation" in the paper, reviewers will ask about calibration quality. Using a proxy is a weakness.
 
@@ -198,9 +206,9 @@ def compute_ece(
 
 ---
 
-### 7. Multi-Token Gating Probe (P2)
+### 7. Multi-Token Gating Probe (P2) ✅
 
-**Status:** `probe_tokens` parameter exists but averaging over multiple positions may not be implemented correctly.
+**Status:** Completed in Session 3 — `_get_multi_token_logits()` in `gating/probe.py`, `should_retrieve()` averages over k positions.
 
 **Problem:** First-token entropy is noisy for factoid queries. The model commits more information over the first 3-5 positions. Averaging entropy over positions 1-3 gives a more stable signal.
 

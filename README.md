@@ -40,6 +40,8 @@ User Query
 ┌─────────────────────────┐
 │  PASSAGE SCORER         │  score = 0.5·P(ent) + 0.2·overlap + 0.3·ret
 │  NLI + token overlap    │  premise=passage, hypothesis=query
+│  Sentence-level NLI     │  (optional: max per-sentence score)
+│  Cross-encoder rerank   │  (optional: rerank before NLI)
 └────────┬────────────────┘
          │ trusted passages (score ≥ 0.4)
          ▼
@@ -61,13 +63,19 @@ User Query
 | Feature | Description |
 |---------|-------------|
 | **Adaptive Gating** | Entropy + logit-gap probe decides retrieval need in one forward pass |
+| **Multi-Token Probe** | Average entropy over k positions for more stable gating signal |
 | **Hybrid Retrieval** | Dense (FAISS HNSW) + sparse (BM25 / Pyserini) with learned α fusion |
 | **NLI-Based Scoring** | RoBERTa-large NLI verifies each passage before generation |
+| **Sentence-Level NLI** | Per-sentence scoring catches relevant sentences in noisy passages |
+| **Cross-Encoder Reranking** | Optional reranking stage for higher-precision passage selection |
 | **FactScore Evaluation** | Claim decomposition + per-claim NLI verification |
+| **Real Provenance** | Claim-to-passage mapping via FactScore NLI details |
+| **Real ECE Calibration** | Binned ECE (Guo et al., 2017) replaces entropy std-dev proxy |
 | **Model Registry** | Singleton cache with 4-bit quantisation — no double-loading |
 | **Pipeline Class** | Load-once, run-many architecture for efficient batch experiments |
-| **Full Mock Mode** | All 53 tests pass in <3 s without GPU or model downloads |
+| **Full Mock Mode** | All 79 tests pass in <15 s without GPU or model downloads |
 | **CI/CD** | GitHub Actions: pytest × 3 Python versions + ruff + mypy |
+| **Analysis Scripts** | 7 scripts for gating/scorer analysis, weight tuning, bootstrap tests |
 
 ---
 
@@ -101,24 +109,34 @@ factuality_rag/
 ├── retriever/
 │   └── hybrid.py            # Hybrid dense+sparse retrieval with score fusion
 ├── gating/
-│   └── probe.py             # Adaptive retrieval gating (entropy + logit gap)
+│   └── probe.py             # Adaptive gating (entropy + logit gap + multi-token probe)
 ├── scorer/
-│   └── passage.py           # NLI + overlap + retrieval score fusion
+│   └── passage.py           # NLI + overlap + ret fusion, sentence-level NLI, cross-encoder
 ├── generator/
 │   └── wrapper.py           # Mistral-7B with [INST] RAG templates
 ├── pipeline/
-│   └── orchestrator.py      # run_pipeline() + Pipeline class (load-once)
+│   └── orchestrator.py      # run_pipeline() + Pipeline class (load-once) + provenance
 ├── eval/
 │   └── metrics.py           # EM, F1, FactScore (claim decomposition + NLI)
 ├── cli/
 │   └── __main__.py          # CLI: chunk-wiki, build-index, run, evaluate
 └── experiment_runner.py     # Batch experiment runner with metadata tracking
 
-configs/                     # YAML experiment configurations
+configs/                     # YAML experiment configurations (B1-B4. full)
+scripts/                     # Analysis & experiment scripts (7 tools)
+  ├── build_corpus.py      # Wikipedia ingestion + index building
+  ├── analyze_gating.py    # Gating oracle analysis
+  ├── analyze_scorer.py    # Scorer AUC analysis
+  ├── analyze_errors.py    # Error taxonomy
+  ├── tune_scorer_weights.py # Weight grid search
+  ├── aggregate_results.py # Cross-seed aggregation
+  └── bootstrap_test.py    # Paired bootstrap significance test
 docs/                        # Architecture, API reference, experiment plan
-tests/                       # 53 unit tests (all mock-mode)
-scripts/                     # Demo script + sample experiment runner
-.github/workflows/ci.yml     # CI pipeline (pytest + ruff + mypy)
+tests/                       # 79 unit tests + 7 integration tests
+  ├── conftest.py          # Registers integration marker
+  ├── test_integration.py  # 7 GPU-only integration tests
+  └── test_new_features.py # 28 Session 3 feature tests
+.github/workflows/ci.yml    # CI pipeline (pytest + ruff + mypy)
 ```
 
 ---
@@ -185,7 +203,7 @@ python scripts/demo.py
 ### Run Tests
 
 ```bash
-pytest tests/ -v                          # All 53 tests, ~3 seconds
+pytest tests/ -v                          # All 79 tests, ~15 seconds
 pytest tests/ -v -m "not integration"     # Skip GPU-requiring tests
 ```
 
@@ -239,8 +257,11 @@ All hyperparameters are controlled via YAML configs in `configs/`:
 | `retriever.alpha` | 0.6 | Dense vs. sparse weight |
 | `gating.entropy_threshold` | 1.2 | Uncertainty threshold |
 | `gating.logit_gap_threshold` | 2.0 | Confidence gap threshold |
+| `gating.probe_tokens` | 1 | Number of positions for multi-token probe |
 | `scorer.score_threshold` | 0.4 | Minimum passage trust score |
 | `scorer.w_nli / w_overlap / w_ret` | 0.5 / 0.2 / 0.3 | Scorer fusion weights |
+| `scorer.nli_mode` | `"passage"` | `"passage"` or `"sentence"` |
+| `scorer.cross_encoder_model` | `null` | Cross-encoder model ID for reranking |
 
 ---
 
@@ -265,6 +286,8 @@ See [`docs/EXPERIMENT_PLAN.md`](docs/EXPERIMENT_PLAN.md) for the full protocol.
 | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Complete API reference for all modules |
 | [`docs/EXPERIMENT_PLAN.md`](docs/EXPERIMENT_PLAN.md) | Evaluation protocol and ablation plan |
 | [`docs/SUGGESTIONS.md`](docs/SUGGESTIONS.md) | Roadmap and improvement suggestions |
+| [`docs/SUGGESTIONS_2.md`](docs/SUGGESTIONS_2.md) | v0.2 → v1.0 improvement roadmap |
+| [`docs/SESSION_LOG.md`](docs/SESSION_LOG.md) | Detailed development session logs |
 
 ---
 

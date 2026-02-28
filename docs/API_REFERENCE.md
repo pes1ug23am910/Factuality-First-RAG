@@ -1,6 +1,6 @@
 # API Reference — Factuality-First RAG
 
-> Version 0.2.0 · Updated 2026-02-28
+> Version 0.3.0 · Updated 2026-03-01
 
 ---
 
@@ -17,6 +17,7 @@
 9. [factuality_rag.model_registry](#9-factuality_ragmodel_registry)
 10. [factuality_rag.cli](#10-factuality_ragcli)
 11. [factuality_rag.experiment_runner](#11-factuality_ragexperiment_runner)
+12. [scripts](#12-scripts)
 
 ---
 
@@ -279,7 +280,23 @@ def should_retrieve(
 
 **Decision rule:** `retrieve = (entropy > entropy_thresh) OR (logit_gap < logit_gap_thresh)`
 
+**Multi-token mode (v0.3):** When `probe_tokens > 1`, uses `_get_multi_token_logits()` to run an autoregressive loop over `k` positions (greedy argmax per step). Entropy and logit gap are computed at each position and *averaged* across all `k` positions before applying thresholds. This produces a more stable gating signal than single-token probing.
+
 **Returns:** `True` if retrieval should happen, `False` to skip.
+
+#### `_get_multi_token_logits(prompt, k)` *(new in v0.3)*
+
+```python
+def _get_multi_token_logits(
+    self,
+    prompt: str,
+    k: int = 3,
+) -> List[torch.Tensor]
+```
+
+Autoregressive loop: for each of `k` positions, forward the current input through the model, extract the last-position logits, append the greedy argmax token, and continue. Returns a list of `k` logit tensors.
+
+**Mock mode:** Returns `k` copies of the single mock logit vector.
 
 #### `calibrate_temperature(dev_prompts, targets=None)`
 
@@ -291,7 +308,31 @@ def calibrate_temperature(
 ) -> float
 ```
 
-Grid search over T ∈ [0.5, 3.0] to minimise ECE proxy. Returns best temperature.
+Grid search over T ∈ [0.5, 3.0] to minimise ECE. Now uses real binned ECE (v0.3) instead of entropy std-dev proxy.
+
+---
+
+### `compute_ece()` *(new in v0.3)*
+
+```python
+def compute_ece(
+    confidences: np.ndarray,
+    accuracies: np.ndarray,
+    n_bins: int = 15,
+) -> float
+```
+
+Module-level function. Computes Expected Calibration Error (Guo et al., 2017) using the standard binned approach.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `confidences` | `np.ndarray` | required | Max softmax probability per query |
+| `accuracies` | `np.ndarray` | required | 1.0 if correct (EM=1), 0.0 otherwise |
+| `n_bins` | `int` | `15` | Number of equal-width bins in [0, 1] |
+
+**Returns:** ECE value in [0, 1] (lower is better).
 
 ---
 
@@ -310,10 +351,19 @@ class PassageScorer:
         w_nli: float = 0.5,
         w_overlap: float = 0.2,
         w_ret: float = 0.3,
+        nli_mode: str = "passage",                     # (new v0.3)
+        cross_encoder_model: Optional[str] = None,     # (new v0.3)
     ) -> None
 ```
 
-Passage-level factuality scorer.
+Passage-level factuality scorer with optional sentence-level NLI and cross-encoder reranking.
+
+**New parameters (v0.3):**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `nli_mode` | `str` | `"passage"` | `"passage"` for full-passage NLI; `"sentence"` for sentence-level max scoring |
+| `cross_encoder_model` | `Optional[str]` | `None` | HF cross-encoder model ID for reranking; `None` disables reranking |
 
 #### `score_passages(query, passages)`
 
@@ -332,6 +382,45 @@ Adds to each passage dict in-place:
 | `nli_score` | `float` | P(entailment) from NLI model — **premise=passage, hypothesis=query** (fixed in v0.2) |
 | `overlap_score` | `float` | Token or char overlap F1 |
 | `final_score` | `float` | Weighted fusion: `w_nli*nli + w_overlap*overlap + w_ret*ret_norm` |
+| `cross_encoder_score` | `float` | *(optional)* Cross-encoder relevance score (only when `cross_encoder_model` is set) |
+
+**Sentence-level NLI (v0.3):** When `nli_mode="sentence"`, each passage is split into sentences and each sentence is scored independently via NLI. The passage receives the *maximum* sentence-level entailment score, addressing the problem where passages with one relevant sentence surrounded by noise scored low.
+
+**Cross-encoder reranking (v0.3):** When `cross_encoder_model` is set, a reranking step runs before NLI scoring. The cross-encoder attends jointly to query+passage, producing more accurate relevance scores than bi-encoder retrieval. Passages are re-sorted and only top-k are passed to NLI.
+
+#### `_split_sentences(text)` *(new in v0.3, static method)*
+
+```python
+@staticmethod
+def _split_sentences(text: str) -> List[str]
+```
+
+Regex-based sentence splitting with abbreviation handling (Mr., Dr., U.S., etc.). Returns list of sentences.
+
+#### `_sentence_level_nli(query, passage_text)` *(new in v0.3)*
+
+```python
+def _sentence_level_nli(self, query: str, passage_text: str) -> float
+```
+
+Score a passage by its best-scoring individual sentence. Falls back to passage-level NLI for single-sentence passages.
+
+#### `_cross_encoder_rerank(query, passages, top_k=10)` *(new in v0.3)*
+
+```python
+def _cross_encoder_rerank(
+    self,
+    query: str,
+    passages: List[Dict[str, Any]],
+    top_k: int = 10,
+) -> List[Dict[str, Any]]
+```
+
+Rerank passages using the cross-encoder model. Adds `cross_encoder_score` to each passage dict. Returns passages sorted by cross-encoder score, limited to `top_k`.
+
+#### `_load_cross_encoder()` *(new in v0.3)*
+
+Lazy loader for the `sentence_transformers.CrossEncoder` model. Called on first use of `_cross_encoder_rerank()`.
 
 ---
 
@@ -407,6 +496,10 @@ Stateless convenience function. Accepts pre-built components via keyword args to
 
 **Confidence logic (fixed in v0.2):** Gating-skipped queries now return `"medium"` (not `"high"`) since there are no passages to verify the answer against.
 
+**Provenance (v0.3):** The returned `provenance` dict is now built from `compute_factscore()` details via `_build_provenance()`. For each supported claim, it maps claim index to the passage ID(s) that provided entailment. Unsupported claims are absent from the dict.
+
+**Config wiring (v0.3):** `nli_mode` and `cross_encoder_model` from YAML config are passed to `PassageScorer` constructor.
+
 ---
 
 ### `Pipeline` *(new in v0.2)*
@@ -455,7 +548,7 @@ Token-level F1 score in [0, 1].
 
 ### `compute_factscore_stub(claims, passages)`
 
-Stub: fraction of claims with >50% token overlap in any passage. Returns float in [0, 1].
+Stub: fraction of claims with >50% token overlap in any passage. Returns float in [0, 1]. Kept for backward compatibility; `compute_factscore()` is preferred.
 
 ### `decompose_claims(answer)` *(new in v0.2)*
 
@@ -597,3 +690,65 @@ Returns metadata dict with: `timestamp`, `git_commit`, `config_path`, `seed`, `m
 **Library versions tracked:** `faiss`, `datasets`, `transformers`, `sentence_transformers`.
 
 The experiment runner now uses `Pipeline` class internally — components are loaded once and reused across all queries in a run (fixed re-instantiation performance bug).
+
+---
+
+## 12. `scripts` *(new in v0.3)*
+
+Standalone analysis and experiment scripts. Not part of the `factuality_rag` library; run directly with `python scripts/<name>.py`.
+
+### `build_corpus.py`
+
+Build a Wikipedia chunk corpus with FAISS + Lucene indexes.
+
+```bash
+python scripts/build_corpus.py --sample-size 100000 --output data/wiki_100k_chunks.jsonl
+```
+
+### `analyze_gating.py`
+
+Phase 4A — gating oracle analysis. Compares gating decisions against oracle (did retrieval actually help?) and computes precision/recall.
+
+```bash
+python scripts/analyze_gating.py --run-dir runs/<run-id>/
+```
+
+### `analyze_scorer.py`
+
+Phase 4B — scorer quality analysis. Computes ROC-AUC, PR-AUC, and optimal threshold from passage-level labels.
+
+```bash
+python scripts/analyze_scorer.py --run-dir runs/<run-id>/
+```
+
+### `analyze_errors.py`
+
+Phase 4C — error taxonomy. Classifies failures into `gating_miss`, `scoring_miss`, and `generation_miss` categories.
+
+```bash
+python scripts/analyze_errors.py --run-dir runs/<run-id>/
+```
+
+### `tune_scorer_weights.py`
+
+Phase 5A-3 — grid search over scorer weight combinations `(w_nli, w_overlap, w_ret)` on a dev set to find the combination that maximises passage-level AUC.
+
+```bash
+python scripts/tune_scorer_weights.py --dev-predictions runs/<run-id>/predictions.jsonl
+```
+
+### `aggregate_results.py`
+
+Cross-seed metric aggregation. Reads multiple run directories and produces a mean ± std table.
+
+```bash
+python scripts/aggregate_results.py --run-dirs runs/seed42/ runs/seed43/ runs/seed44/
+```
+
+### `bootstrap_test.py`
+
+Paired bootstrap significance test (Berg-Kirkpatrick et al., 2012). Compares two systems on the same test set.
+
+```bash
+python scripts/bootstrap_test.py --system-a runs/baseline/ --system-b runs/full/ --n-bootstrap 1000
+```
