@@ -23,8 +23,8 @@ gating:
   calibration_temp: 1.0
 
 index:
-  faiss_out: "indexes/faiss.index"
-  pyserini_out: "indexes/pyserini_dir"
+  faiss_out: "indexes/wiki100k.faiss"
+  pyserini_out: "indexes/wiki100k_lucene"
 
 retriever:
   alpha: 0.6

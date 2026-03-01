@@ -210,7 +210,7 @@ class WikiChunker:
         self,
         sample_size: Optional[int] = None,
         output_path: Optional[str] = None,
-        wiki_config: str = "20220301.en",
+        wiki_config: str = "20231101.en",
     ) -> List[Dict[str, Any]]:
         """Load Wikipedia articles from HuggingFace and chunk them.
 
@@ -240,7 +240,7 @@ class WikiChunker:
             sample_size or "ALL",
         )
         wiki = load_dataset(
-            "wikipedia", wiki_config, split="train", streaming=True
+            "wikimedia/wikipedia", wiki_config, split="train", streaming=True,
         )
 
         def _article_iter():

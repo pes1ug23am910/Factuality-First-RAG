@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 # ── Known dataset configs ─────────────────────────────────────
 _DATASET_CONFIGS: dict[str, dict[str, str]] = {
-    "natural_questions": {"path": "natural_questions", "name": "default"},
+    "natural_questions": {"path": "google-research-datasets/nq_open", "name": None},
+    "nq_open": {"path": "google-research-datasets/nq_open", "name": None},
     "hotpot_qa": {"path": "hotpot_qa", "name": "fullwiki"},
     "fever": {"path": "fever", "name": "v1.0"},
     "trivia_qa": {"path": "trivia_qa", "name": "rc"},
@@ -38,7 +39,6 @@ def load_dataset(
     dev_sample_size: Optional[int] = None,
     *,
     streaming: bool = False,
-    trust_remote_code: bool = True,
 ) -> hf_datasets.Dataset:
     """Load a HuggingFace dataset with optional dev-sampling.
 
@@ -49,7 +49,6 @@ def load_dataset(
         dev_sample_size: If set, randomly sample this many rows (deterministic,
                          seed=42) for fast dev iteration.
         streaming: Whether to use streaming mode.
-        trust_remote_code: Passed to ``datasets.load_dataset``.
 
     Returns:
         A ``datasets.Dataset`` (or ``IterableDataset`` when streaming).
@@ -67,7 +66,6 @@ def load_dataset(
         "path": cfg["path"],
         "split": split,
         "streaming": streaming,
-        "trust_remote_code": trust_remote_code,
     }
     if cfg.get("name"):
         kwargs["name"] = cfg["name"]

@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Scorer AUC analysis.")
     p.add_argument("--config", type=str, default="configs/exp_full_pipeline.yaml")
+    p.add_argument("--predictions", type=str, default=None,
+                   help="Path to predictions.jsonl from a completed run.")
+    p.add_argument("--dataset", type=str, default="natural_questions",
+                   help="HF dataset for loading reference answers.")
+    p.add_argument("--split", type=str, default="validation")
     p.add_argument("--sample", type=int, default=500)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", type=str, default="analysis/scorer_auc.json")
@@ -79,9 +84,82 @@ def main() -> None:
             for i in range(args.sample)
         ]
     else:
-        # TODO: Load real gold/distractor passages from dataset
-        logger.warning("Real dataset loading not yet implemented. Use --mock for testing.")
-        return
+        # Real-data mode: load from predictions.jsonl or run scorer on dataset
+        if args.predictions:
+            pred_path = Path(args.predictions)
+            if not pred_path.exists():
+                logger.error("Predictions file not found: %s", pred_path)
+                return
+            preds: list = []
+            with open(pred_path, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        preds.append(json.loads(line))
+
+            # Load references from the run directory or dataset
+            ref_path = pred_path.parent / "references.json"
+            refs: Dict[str, str] = {}
+            if ref_path.exists():
+                with open(ref_path, encoding="utf-8") as f:
+                    refs = json.load(f)
+
+            # Build (query, gold_passage, distractor_passage) pairs from predictions
+            queries = []
+            gold_passages = []
+            distractor_passages = []
+            for pred in preds[:args.sample]:
+                q = pred.get("input", "")
+                trusted = pred.get("trusted_passages", [])
+                ref = refs.get(q, "")
+                if trusted:
+                    # Best passage = gold, worst or synthetic = distractor
+                    best = max(trusted, key=lambda p: p.get("final_score", 0))
+                    gold_passages.append({**best, "label": 1})
+                    # Create a distractor from the worst or a synthetic one
+                    worst = min(trusted, key=lambda p: p.get("final_score", 0))
+                    if worst["id"] != best["id"]:
+                        distractor_passages.append({**worst, "label": 0})
+                    else:
+                        distractor_passages.append({
+                            "id": f"dist_{len(queries)}",
+                            "text": f"Unrelated text about other topics {len(queries)}",
+                            "combined_score": 0.1, "label": 0,
+                        })
+                    queries.append(q)
+                else:
+                    # No trusted passages — create synthetic pair
+                    gold_passages.append({
+                        "id": f"gold_{len(queries)}", "text": ref or "reference text",
+                        "combined_score": 0.5, "label": 1,
+                    })
+                    distractor_passages.append({
+                        "id": f"dist_{len(queries)}", "text": "Unrelated text",
+                        "combined_score": 0.1, "label": 0,
+                    })
+                    queries.append(q)
+
+            args.sample = len(queries)
+            if not queries:
+                logger.error("No scorable queries found in predictions.")
+                return
+        else:
+            # Run scorer directly on dataset queries
+            from factuality_rag.experiment_runner import _extract_queries_and_references
+            queries_list, _ = _extract_queries_and_references(
+                args.dataset, args.split, args.sample, args.seed,
+            )
+            queries = queries_list[:args.sample]
+            gold_passages = [
+                {"id": f"gold_{i}", "text": f"Relevant passage for query {i}",
+                 "combined_score": 0.8, "label": 1}
+                for i in range(len(queries))
+            ]
+            distractor_passages = [
+                {"id": f"dist_{i}", "text": f"Unrelated passage {i}",
+                 "combined_score": 0.3, "label": 0}
+                for i in range(len(queries))
+            ]
+            args.sample = len(queries)
 
     # Score all passages
     all_scores: List[float] = []

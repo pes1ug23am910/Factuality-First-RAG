@@ -89,10 +89,12 @@ def run_pipeline(
     seed: int = 42,
     mock_mode: bool = False,
     *,
+    config: Optional[Dict[str, Any]] = None,
     probe: Optional[Any] = None,
     retriever: Optional[Any] = None,
     scorer: Optional[Any] = None,
     generator: Optional[Any] = None,
+    info: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], str]:
     """Run the full Factuality-first RAG pipeline.
 
@@ -116,10 +118,16 @@ def run_pipeline(
         seed: Random seed for reproducibility.
         mock_mode: If ``True``, all components run in mock-mode
                    (no model downloads, deterministic outputs).
+        config: Optional pre-loaded config dict.  When provided
+                this takes priority over *config_path* so callers
+                can pass overridden settings without touching disk.
         probe: Optional pre-built :class:`~factuality_rag.gating.probe.GatingProbe`.
         retriever: Optional pre-built :class:`~factuality_rag.retriever.hybrid.HybridRetriever`.
         scorer: Optional pre-built :class:`~factuality_rag.scorer.passage.PassageScorer`.
         generator: Optional pre-built :class:`~factuality_rag.generator.wrapper.Generator`.
+        info: Optional mutable dict populated with run metadata
+              (``retrieval_triggered``, ``gating_enabled``). Useful
+              for experiment tracking without changing the return type.
 
     Returns:
         Tuple of ``(answer, trusted_passages, provenance, confidence_tag)``:
@@ -142,7 +150,7 @@ def run_pipeline(
     random.seed(seed)
     np.random.seed(seed)
 
-    cfg = _load_config(config_path)
+    cfg = config if config is not None else _load_config(config_path)
 
     # ── Component imports (lazy, inside function) ─────────────
     from factuality_rag.gating.probe import GatingProbe
@@ -171,7 +179,7 @@ def run_pipeline(
 
     # ── 2. Retrieval ──────────────────────────────────────────
     passages: List[Dict[str, Any]] = []
-    if retrieval_needed:
+    if retrieval_needed and k > 0:
         ret_cfg = cfg.get("retriever", {})
         if retriever is not None:
             _retriever = retriever
@@ -234,6 +242,11 @@ def run_pipeline(
     logger.info(
         "Pipeline done: %d trusted passages, confidence=%s", len(trusted), confidence_tag
     )
+
+    # Populate info dict for experiment tracking
+    if info is not None:
+        info["retrieval_triggered"] = retrieval_needed
+        info["gating_enabled"] = gate
 
     return answer, trusted, provenance, confidence_tag
 
@@ -346,13 +359,15 @@ class Pipeline:
         config_path: str = _DEFAULT_CONFIG,
         mock_mode: bool = False,
         seed: int = 42,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         from factuality_rag.gating.probe import GatingProbe
         from factuality_rag.generator.wrapper import Generator
         from factuality_rag.retriever.hybrid import HybridRetriever
         from factuality_rag.scorer.passage import PassageScorer
 
-        self.cfg = _load_config(config_path)
+        self.cfg = config if config is not None else _load_config(config_path)
+        self._config_path = config_path
         self.mock_mode = mock_mode
         self.seed = seed
 
@@ -374,39 +389,47 @@ class Pipeline:
             temp=gating_cfg.get("calibration_temp", 1.0),
         )
 
-        if mock_mode:
-            self.retriever = HybridRetriever.build_mock(
-                n_docs=max(ret_cfg.get("top_k", 10) * 2, 20),
-                seed=seed,
-                alpha=ret_cfg.get("alpha", 0.6),
-            )
-        else:
-            self.retriever = HybridRetriever(
-                faiss_index_path=idx_cfg.get("faiss_out", "indexes/faiss.index"),
-                pyserini_index_path=idx_cfg.get(
-                    "pyserini_out", "indexes/pyserini_dir"
-                ),
-                embed_model=models_cfg.get(
-                    "dense_embedder",
-                    "sentence-transformers/all-mpnet-base-v2",
-                ),
-                alpha=ret_cfg.get("alpha", 0.6),
-                normalize=ret_cfg.get("normalize", True),
-            )
+        top_k = ret_cfg.get("top_k", 10)
+        self.k = top_k
 
-        self.scorer = PassageScorer(
-            nli_model_hf=models_cfg.get(
-                "nli_verifier",
-                "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli",
-            ),
-            overlap_metric=scorer_cfg.get("overlap_metric", "token"),
-            mock_mode=mock_mode,
-            w_nli=weights.get("w_nli", 0.5),
-            w_overlap=weights.get("w_overlap", 0.2),
-            w_ret=weights.get("w_ret", 0.3),
-            nli_mode=scorer_cfg.get("nli_mode", "passage"),
-            cross_encoder_model=scorer_cfg.get("cross_encoder_model", None),
-        )
+        # Closed-book mode: skip retriever/scorer when top_k == 0
+        if top_k == 0 and not mock_mode:
+            self.retriever = None
+            self.scorer = None
+        else:
+            if mock_mode:
+                self.retriever = HybridRetriever.build_mock(
+                    n_docs=max(top_k * 2, 20),
+                    seed=seed,
+                    alpha=ret_cfg.get("alpha", 0.6),
+                )
+            else:
+                self.retriever = HybridRetriever(
+                    faiss_index_path=idx_cfg.get("faiss_out", "indexes/faiss.index"),
+                    pyserini_index_path=idx_cfg.get(
+                        "pyserini_out", "indexes/pyserini_dir"
+                    ),
+                    embed_model=models_cfg.get(
+                        "dense_embedder",
+                        "sentence-transformers/all-mpnet-base-v2",
+                    ),
+                    alpha=ret_cfg.get("alpha", 0.6),
+                    normalize=ret_cfg.get("normalize", True),
+                )
+
+            self.scorer = PassageScorer(
+                nli_model_hf=models_cfg.get(
+                    "nli_verifier",
+                    "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli",
+                ),
+                overlap_metric=scorer_cfg.get("overlap_metric", "token"),
+                mock_mode=mock_mode,
+                w_nli=weights.get("w_nli", 0.5),
+                w_overlap=weights.get("w_overlap", 0.2),
+                w_ret=weights.get("w_ret", 0.3),
+                nli_mode=scorer_cfg.get("nli_mode", "passage"),
+                cross_encoder_model=scorer_cfg.get("cross_encoder_model", None),
+            )
 
         self.generator = Generator(
             model_name=generator_id,
@@ -414,9 +437,8 @@ class Pipeline:
         )
 
         self.score_threshold = scorer_cfg.get("score_threshold", 0.4)
-        self.k = ret_cfg.get("top_k", 10)
         self._gating_cfg = gating_cfg
-        logger.info("Pipeline initialised (mock_mode=%s).", mock_mode)
+        logger.info("Pipeline initialised (mock_mode=%s, top_k=%d).", mock_mode, top_k)
 
     def run(
         self,
@@ -426,6 +448,7 @@ class Pipeline:
         gate: bool = True,
         score_threshold: Optional[float] = None,
         seed: Optional[int] = None,
+        info: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], str]:
         """Run the pipeline on a single query, reusing loaded components.
 
@@ -435,6 +458,7 @@ class Pipeline:
             gate: Whether to apply the gating probe.
             score_threshold: Override for minimum ``final_score``.
             seed: Override for random seed.
+            info: Optional mutable dict populated with run metadata.
 
         Returns:
             ``(answer, trusted_passages, provenance, confidence_tag)``
@@ -448,14 +472,18 @@ class Pipeline:
         """
         return run_pipeline(
             query,
-            k=k or self.k,
+            k=k if k is not None else self.k,
             gate=gate,
-            score_threshold=score_threshold or self.score_threshold,
-            config_path=_DEFAULT_CONFIG,
-            seed=seed or self.seed,
+            score_threshold=(
+                score_threshold if score_threshold is not None
+                else self.score_threshold
+            ),
+            config=self.cfg,
+            seed=seed if seed is not None else self.seed,
             mock_mode=self.mock_mode,
             probe=self.probe,
             retriever=self.retriever,
             scorer=self.scorer,
             generator=self.generator,
+            info=info,
         )

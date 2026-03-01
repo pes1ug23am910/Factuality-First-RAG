@@ -9,7 +9,7 @@ models:
   dense_embedder: "sentence-transformers/all-mpnet-base-v2"
   dpr_encoder: "facebook/dpr-question_encoder-single-nq-base"
   nli_verifier: "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli"
-  generator: "mistral-7b-instruct"          # placeholder
+  generator: "mistralai/Mistral-7B-Instruct-v0.3"
 
 # ── Data ──────────────────────────────────────────────────────
 data:
@@ -38,8 +38,8 @@ chunker:
 
 # ── Index ─────────────────────────────────────────────────────
 index:
-  faiss_out: "indexes/faiss.index"
-  pyserini_out: "indexes/pyserini_dir"
+  faiss_out: "indexes/wiki100k.faiss"
+  pyserini_out: "indexes/wiki100k_lucene"
   faiss_type: "hnsw_flat"                    # hnsw_flat | ivfpq
   hnsw_m: 32
   hnsw_ef_construction: 200
