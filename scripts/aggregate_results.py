@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--runs-dir", type=str, default="runs", help="Base runs directory.")
     p.add_argument("--configs", nargs="+", default=["B1", "B2", "B3", "B4", "full"],
                    help="Config names to aggregate.")
+    p.add_argument("--pattern", type=str, default=None,
+                   help="Glob pattern to match run directory names (e.g. 'full_nq_500_s*').")
     p.add_argument("--output", type=str, default="analysis/aggregated_results.json")
     return p.parse_args()
 
@@ -77,9 +79,15 @@ def main() -> None:
         logger.warning("Runs directory not found: %s", runs_base)
         return
 
-    # Discover all run directories
+    # Discover run directories — filter by --pattern if provided
+    import fnmatch
+
     all_runs = sorted(d for d in runs_base.iterdir() if d.is_dir())
-    logger.info("Found %d run directories in %s", len(all_runs), runs_base)
+    if args.pattern:
+        all_runs = [d for d in all_runs if fnmatch.fnmatch(d.name, args.pattern)]
+
+    logger.info("Found %d run directories in %s (pattern=%s)",
+                len(all_runs), runs_base, args.pattern or "*")
 
     # Group runs by config
     grouped: Dict[str, List[Dict[str, float]]] = {}
@@ -87,12 +95,16 @@ def main() -> None:
         meta = load_run_metadata(run_dir)
         config_path = meta.get("config_path", "")
 
-        # Match config name
+        # Match config name from path or run directory name
         config_name = "unknown"
         for name in args.configs:
-            if name.lower() in config_path.lower():
+            if name.lower() in config_path.lower() or name.lower() in run_dir.name.lower():
                 config_name = name
                 break
+
+        # If using --pattern, use "matched" as group name when no config match
+        if args.pattern and config_name == "unknown":
+            config_name = args.pattern.replace("*", "")
 
         if config_name not in grouped:
             grouped[config_name] = []
@@ -103,7 +115,7 @@ def main() -> None:
 
     # Aggregate
     summary: Dict[str, Dict[str, Any]] = {}
-    metric_keys = {"exact_match", "f1", "factscore", "n_predictions"}
+    metric_keys = {"exact_match", "f1", "factscore", "n_predictions", "retrieval_rate", "retrieval_count"}
 
     for config_name, runs in grouped.items():
         if not runs:
@@ -128,23 +140,28 @@ def main() -> None:
         summary[config_name] = agg
 
     # Print table
-    print("\n" + "=" * 80)
-    print(f"{'Config':<12} {'EM':>12} {'F1':>12} {'FactScore':>12} {'Runs':>6}")
-    print("-" * 80)
-    for name in args.configs:
+    print("\n" + "=" * 90)
+    print(f"{'Config':<15} {'EM':>12} {'F1':>12} {'FactScore':>12} {'Ret%':>10} {'Runs':>6}")
+    print("-" * 90)
+
+    display_names = list(grouped.keys()) if args.pattern else args.configs
+    for name in display_names:
         if name in summary:
             s = summary[name]
             em = s.get("exact_match", {})
             f1 = s.get("f1", {})
             fs = s.get("factscore", {})
+            rr = s.get("retrieval_rate", {})
+            rr_str = f"{rr.get('mean', 0)*100:.1f}%" if rr else "—"
             print(
-                f"{name:<12} "
+                f"{name:<15} "
                 f"{em.get('mean', 0):.4f}±{em.get('std', 0):.4f}  "
                 f"{f1.get('mean', 0):.4f}±{f1.get('std', 0):.4f}  "
                 f"{fs.get('mean', 0):.4f}±{fs.get('std', 0):.4f}  "
+                f"{rr_str:>10}  "
                 f"{s['n_runs']:>6}"
             )
-    print("=" * 80 + "\n")
+    print("=" * 90 + "\n")
 
     # Save
     out_path = Path(args.output)

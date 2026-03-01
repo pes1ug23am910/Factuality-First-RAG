@@ -38,6 +38,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--step", type=float, default=0.1, help="Grid step size.")
     p.add_argument("--sample", type=int, default=200)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--dataset", type=str, default="natural_questions",
+                   help="HF dataset for loading queries.")
+    p.add_argument("--split", type=str, default="validation")
     p.add_argument("--output", type=str, default="analysis/weight_tuning.json")
     p.add_argument("--mock", action="store_true")
     return p.parse_args()
@@ -90,9 +93,12 @@ def main() -> None:
         ] * (args.sample // 3 + 1)
         queries = queries[:args.sample]
     else:
-        # TODO: Load real queries from dataset
-        logger.warning("Real dataset loading not yet implemented. Use --mock.")
-        return
+        # Real mode: load queries from HF dataset
+        from factuality_rag.experiment_runner import _extract_queries_and_references
+        all_queries, _ = _extract_queries_and_references(
+            args.dataset, args.split, args.sample, args.seed,
+        )
+        queries = all_queries[:args.sample]
 
     # Collect (query, passages, answer) triples
     logger.info("Running pipeline on %d queries ...", len(queries))

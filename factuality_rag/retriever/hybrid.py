@@ -86,6 +86,7 @@ class HybridRetriever:
         self._mock_mode: bool = False
         self._mock_embeddings: Optional[np.ndarray] = None
         self._dim: int = 768
+        self._lucene_searcher: Any = None
 
     # ── Factory helpers ───────────────────────────────────────
 
@@ -155,18 +156,47 @@ class HybridRetriever:
             raise FileNotFoundError(f"FAISS index not found: {p}")
         self._faiss_index = faiss.read_index(str(p))
 
+        # Load ID mapping (try .ids.json first, then .json dict)
         id_map_path = p.with_suffix(".ids.json")
         if id_map_path.exists():
             with open(id_map_path, encoding="utf-8") as f:
                 self._id_map = json.load(f)
+        else:
+            doc_map_path = p.with_suffix(".json")
+            if doc_map_path.exists():
+                with open(doc_map_path, encoding="utf-8") as f:
+                    doc_map = json.load(f)
+                # Reconstruct id list from numbered keys
+                self._id_map = [
+                    doc_map[str(i)].get("id", str(i))
+                    for i in range(len(doc_map))
+                ]
 
-        # Try to load texts from the corpus JSONL next to the index
-        corpus_path = p.with_suffix(".jsonl")
-        if corpus_path.exists():
-            with open(corpus_path, encoding="utf-8") as f:
-                for line in f:
-                    obj = json.loads(line)
-                    self._texts.append(obj.get("text", ""))
+        # Load texts from JSONL corpus (same directory or data/)
+        corpus_candidates = [
+            p.with_suffix(".jsonl"),
+            Path("data") / "wiki_100000_chunks.jsonl",
+        ]
+        for corpus_path in corpus_candidates:
+            if corpus_path.exists():
+                self._texts = []
+                with open(corpus_path, encoding="utf-8") as f:
+                    for line in f:
+                        obj = json.loads(line)
+                        self._texts.append(obj.get("text", ""))
+                break
+
+        # If no texts loaded from JSONL, try from doc map
+        if not self._texts:
+            doc_map_path = p.with_suffix(".json")
+            if doc_map_path.exists():
+                with open(doc_map_path, encoding="utf-8") as f:
+                    doc_map = json.load(f)
+                self._texts = [
+                    doc_map[str(i)].get("text", "")
+                    for i in range(len(doc_map))
+                ]
+
         logger.info("Loaded FAISS index: %d vectors", self._faiss_index.ntotal)
 
     def _get_embed_model(self) -> Any:
@@ -304,18 +334,34 @@ class HybridRetriever:
 
         # Real Pyserini BM25 search
         try:
-            from pyserini.search.lucene import LuceneSearcher  # type: ignore[import-untyped]
+            if self._lucene_searcher is None:
+                # Ensure JAVA_HOME is set for pyserini/jnius
+                import os
+                if "JAVA_HOME" not in os.environ:
+                    jdk_path = Path.home() / ".jdk"
+                    if jdk_path.exists():
+                        jdks = sorted(jdk_path.iterdir(), reverse=True)
+                        if jdks:
+                            os.environ["JAVA_HOME"] = str(jdks[0])
+                            os.environ["PATH"] = (
+                                str(jdks[0] / "bin") + os.pathsep + os.environ["PATH"]
+                            )
+                            logger.info("Auto-set JAVA_HOME=%s", jdks[0])
 
-            idx_path = Path(self.pyserini_index_path)
-            if not idx_path.exists():
-                logger.warning(
-                    "Pyserini index not found at '%s'; falling back to empty BM25.",
-                    idx_path,
-                )
-                return {}
+                from pyserini.search.lucene import LuceneSearcher  # type: ignore[import-untyped]
 
-            searcher = LuceneSearcher(str(idx_path))
-            hits = searcher.search(query, k)
+                idx_path = Path(self.pyserini_index_path)
+                if not idx_path.exists():
+                    logger.warning(
+                        "Pyserini index not found at '%s'; falling back to empty BM25.",
+                        idx_path,
+                    )
+                    return {}
+
+                self._lucene_searcher = LuceneSearcher(str(idx_path))
+                logger.info("Loaded Lucene index: %d docs", self._lucene_searcher.num_docs)
+
+            hits = self._lucene_searcher.search(query, k)
             return {hit.docid: float(hit.score) for hit in hits}
         except ImportError:
             logger.warning(
