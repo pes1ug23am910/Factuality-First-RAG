@@ -4,7 +4,8 @@ factuality_rag.data.loader
 Unified dataset loading wrapper around HuggingFace ``datasets``.
 
 Supported datasets:
-    natural_questions, hotpot_qa, fever, trivia_qa, EleutherAI/truthful_qa_mc
+    natural_questions, hotpot_qa, fever, truthful_qa,
+    popqa, hagrid, 2wikimultihopqa
 
 Example::
 
@@ -22,14 +23,30 @@ import datasets as hf_datasets
 logger = logging.getLogger(__name__)
 
 # ── Known dataset configs ─────────────────────────────────────
-_DATASET_CONFIGS: dict[str, dict[str, str]] = {
+# "revision" is set for datasets whose loading scripts were removed
+# in datasets >= 4.x; the parquet conversion lives on a special ref.
+_DATASET_CONFIGS: dict[str, dict[str, str | None]] = {
     "natural_questions": {"path": "google-research-datasets/nq_open", "name": None},
     "nq_open": {"path": "google-research-datasets/nq_open", "name": None},
     "hotpot_qa": {"path": "hotpot_qa", "name": "fullwiki"},
-    "fever": {"path": "fever", "name": "v1.0"},
-    "trivia_qa": {"path": "trivia_qa", "name": "rc"},
+    "fever": {
+        "path": "fever",
+        "name": "default",
+        "revision": "refs/convert/parquet",
+    },
     "truthful_qa": {"path": "EleutherAI/truthful_qa_mc", "name": None},
     "EleutherAI/truthful_qa_mc": {"path": "EleutherAI/truthful_qa_mc", "name": None},
+    "popqa": {"path": "akariasai/PopQA", "name": None},
+    "hagrid": {
+        "path": "miracl/hagrid",
+        "name": None,
+        "revision": "refs/convert/parquet",
+    },
+    "2wikimultihopqa": {
+        "path": "xanhho/2WikiMultihopQA",
+        "name": None,
+        "revision": "refs/convert/parquet",
+    },
 }
 
 
@@ -69,6 +86,8 @@ def load_dataset(
     }
     if cfg.get("name"):
         kwargs["name"] = cfg["name"]
+    if cfg.get("revision"):
+        kwargs["revision"] = cfg["revision"]
 
     ds = hf_datasets.load_dataset(**kwargs)
 

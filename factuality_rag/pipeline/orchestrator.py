@@ -221,6 +221,24 @@ def run_pipeline(
     if passages:
         passages = _scorer.score_passages(query, passages)
 
+    # ── 3b. Learned scorer (optional) ─────────────────────────
+    if passages and scorer_cfg.get("use_learned"):
+        from factuality_rag.scorer.learned_scorer import LearnedScorer
+
+        lm_path = scorer_cfg.get("learned_model_path", "models/learned_scorer_logreg")
+        try:
+            learned = LearnedScorer.load(lm_path)
+            passages = learned.score_passages(passages)
+            # Replace final_score with learned_score for downstream filtering
+            for p in passages:
+                p["final_score"] = p.get("learned_score", p.get("final_score", 0))
+            logger.info("Applied learned scorer from %s", lm_path)
+        except FileNotFoundError:
+            logger.warning(
+                "Learned scorer not found at %s — falling back to hand-tuned weights.",
+                lm_path,
+            )
+
     # ── 4. Filter ─────────────────────────────────────────────
     trusted = [p for p in passages if p.get("final_score", 0) >= score_threshold]
 
@@ -245,7 +263,7 @@ def run_pipeline(
 
     # Populate info dict for experiment tracking
     if info is not None:
-        info["retrieval_triggered"] = retrieval_needed
+        info["retrieval_triggered"] = retrieval_needed and k > 0
         info["gating_enabled"] = gate
 
     return answer, trusted, provenance, confidence_tag
@@ -430,6 +448,22 @@ class Pipeline:
                 nli_mode=scorer_cfg.get("nli_mode", "passage"),
                 cross_encoder_model=scorer_cfg.get("cross_encoder_model", None),
             )
+
+        # ── Optional learned scorer ───────────────────────────
+        self.learned_scorer = None
+        if scorer_cfg.get("use_learned"):
+            from factuality_rag.scorer.learned_scorer import LearnedScorer
+
+            lm_path = scorer_cfg.get(
+                "learned_model_path", "models/learned_scorer_logreg"
+            )
+            try:
+                self.learned_scorer = LearnedScorer.load(lm_path)
+                logger.info("Loaded learned scorer from %s", lm_path)
+            except FileNotFoundError:
+                logger.warning(
+                    "Learned scorer not found at %s — will use hand-tuned.", lm_path
+                )
 
         self.generator = Generator(
             model_name=generator_id,

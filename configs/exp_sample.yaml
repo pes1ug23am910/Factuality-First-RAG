@@ -16,17 +16,19 @@ data:
   wiki_corpus: "data/wiki_chunks.jsonl"      # path to chunked corpus
   datasets:
     - name: "natural_questions"
-      split: "train"
+      split: "validation"
     - name: "hotpot_qa"
       config: "fullwiki"
-      split: "train"
+      split: "validation"
     - name: "fever"
-      config: "v1.0"
-      split: "train"
-    - name: "trivia_qa"
-      config: "rc"
-      split: "train"
+      split: "validation"
     - name: "EleutherAI/truthful_qa_mc"
+      split: "validation"
+    - name: "popqa"
+      split: "test"
+    - name: "hagrid"
+      split: "validation"
+    - name: "2wikimultihopqa"
       split: "validation"
   dev_sample_size: 50                        # limit for quick dev runs
 
