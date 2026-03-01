@@ -309,8 +309,8 @@ def _extract_queries_and_references(
     references: List[str] = []
 
     for row in ds:
-        # Extract question
-        q = row.get("question", "")
+        # Extract question — column name varies by dataset
+        q = row.get("question", "") or row.get("query", "") or row.get("claim", "")
         if isinstance(q, dict):
             q = q.get("text", str(q))
         q = str(q).strip()
@@ -339,39 +339,61 @@ def _extract_reference(row: Dict[str, Any], dataset_name: str) -> str:
     Returns:
         Reference answer string.
     """
-    # NQ-Open: answer is a list of strings
+    dn = dataset_name.lower()
+
+    # ── PopQA: possible_answers is a list ─────────────────────
+    if "popqa" in dn:
+        pa = row.get("possible_answers", [])
+        if isinstance(pa, list) and pa:
+            return pa[0]
+        obj = row.get("obj", "")
+        return str(obj) if obj else ""
+
+    # ── HAGRID: answers list with attributable text ───────────
+    if "hagrid" in dn:
+        answers = row.get("answers", [])
+        if isinstance(answers, list) and answers:
+            first = answers[0]
+            if isinstance(first, dict):
+                return str(first.get("answer", ""))
+            return str(first)
+        return ""
+
+    # ── 2WikiMultiHopQA: answer field is a string ────────────
+    if "2wiki" in dn or "wikimultihop" in dn:
+        return str(row.get("answer", ""))
+
+    # ── FEVER: label as reference ────────────────────────────
+    if "fever" in dn:
+        return str(row.get("label", ""))
+
+    # ── NQ-Open: answer is a list of strings ─────────────────
     answer = row.get("answer", "")
     if isinstance(answer, list):
         return answer[0] if answer else ""
 
     if isinstance(answer, dict):
-        # NQ default: annotations with short_answers
         val = answer.get("value", "")
         if val:
             return str(val)
-        # Try aliases
         for key in ("text", "normalized_aliases"):
             v = answer.get(key, "")
             if v:
                 return str(v) if not isinstance(v, list) else v[0]
         return str(answer)
 
-    # HotpotQA: answer field is a string
-    if dataset_name == "hotpot_qa":
+    # ── HotpotQA: answer field is a string ───────────────────
+    if "hotpot" in dn:
         return str(row.get("answer", ""))
 
-    # TruthfulQA: best_answer or correct_answers
-    if "truthful" in dataset_name.lower():
+    # ── TruthfulQA: best_answer or correct_answers ───────────
+    if "truthful" in dn:
         best = row.get("best_answer", "")
         if best:
             return str(best)
         correct = row.get("correct_answers", [])
         if correct:
             return correct[0] if isinstance(correct, list) else str(correct)
-
-    # FEVER: label as reference
-    if dataset_name == "fever":
-        return str(row.get("label", ""))
 
     return str(answer)
 

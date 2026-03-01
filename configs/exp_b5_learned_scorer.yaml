@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────
+# Experiment — B5: Learned scorer  (full pipeline + learned MLP)
+# Same as full_pipeline but uses the learned scorer instead of
+# hand-tuned weights (0.5/0.2/0.3).
+# ──────────────────────────────────────────────────────────────
+
+seed: 42
+
+models:
+  dense_embedder: "sentence-transformers/all-mpnet-base-v2"
+  nli_verifier: "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli"
+  generator: "mistralai/Mistral-7B-Instruct-v0.3"
+
+data:
+  datasets:
+    - name: "natural_questions"
+      split: "validation"
+  dev_sample_size: 500
+
+gating:
+  enabled: true
+  entropy_thresh: 1.2
+  logit_gap_thresh: 2.0
+  probe_tokens: 1
+  calibration_temp: 1.0
+
+index:
+  faiss_out: "indexes/wiki100k.faiss"
+  pyserini_out: "indexes/wiki100k_lucene"
+
+retriever:
+  alpha: 0.6
+  normalize: true
+  top_k: 10
+  rerank: true
+
+scorer:
+  overlap_metric: "token"
+  weights:
+    w_nli: 0.5
+    w_overlap: 0.2
+    w_ret: 0.3
+  score_threshold: 0.4
+  use_learned: true
+  learned_model_path: "models/learned_scorer_logreg"
+
+eval:
+  metrics:
+    - exact_match
+    - f1
+    - factscore_stub
