@@ -88,3 +88,22 @@ huggingface_cache/
 .env
 *.key
 *.pem
+
+# ========================
+# Local working material (not part of the source distribution)
+# ========================
+# Generated only inside clean upload bundles; never activate in checkout.
+/uv.toml
+docs/SUGGESTIONS*.md
+
+# Private review, planning, and operational protocol material
+*Review-Transcript*.md
+GPT-*-Review-Transcript.md
+OLD_README.md
+OLD-2-README.md
+docs/EXPERIMENT_PLAN.md
+docs/EXPERIMENT_RUNBOOK*.md
+docs/PAPER_OUTLINE*.md
+docs/PROTOCOL_G0_DRAFT.md
+configs/protocol_g0_draft.yaml
+tests/test_protocol_g0_contract.py

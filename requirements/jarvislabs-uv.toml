@@ -1,0 +1,4 @@
+# Active only when copied to the upload bundle root as uv.toml.
+# JarvisLabs creates the project venv with --system-site-packages, so keep the
+# template's matched CUDA framework stack instead of shadowing it in .venv.
+exclude-dependencies = ["torch", "torchvision", "torchaudio", "triton"]

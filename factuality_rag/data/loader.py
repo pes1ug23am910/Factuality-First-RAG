@@ -4,8 +4,9 @@ factuality_rag.data.loader
 Unified dataset loading wrapper around HuggingFace ``datasets``.
 
 Supported datasets:
-    natural_questions, hotpot_qa, fever, truthful_qa,
-    popqa, hagrid, 2wikimultihopqa
+    natural_questions, hotpot_qa, 2wikimultihopqa.
+    FEVER, TruthfulQA, PopQA, and HAGRID are deliberately disabled until
+    task-specific prompting, metadata, and evaluation adapters are implemented.
 
 Example::
 
@@ -18,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import datasets as hf_datasets
+import datasets as hf_datasets  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,6 @@ _DATASET_CONFIGS: dict[str, dict[str, str | None]] = {
     "natural_questions": {"path": "google-research-datasets/nq_open", "name": None},
     "nq_open": {"path": "google-research-datasets/nq_open", "name": None},
     "hotpot_qa": {"path": "hotpot_qa", "name": "fullwiki"},
-    "fever": {
-        "path": "fever",
-        "name": "default",
-        "revision": "refs/convert/parquet",
-    },
-    "truthful_qa": {"path": "EleutherAI/truthful_qa_mc", "name": None},
-    "EleutherAI/truthful_qa_mc": {"path": "EleutherAI/truthful_qa_mc", "name": None},
     "popqa": {"path": "akariasai/PopQA", "name": None},
     "hagrid": {
         "path": "miracl/hagrid",
@@ -49,6 +43,16 @@ _DATASET_CONFIGS: dict[str, dict[str, str | None]] = {
     },
 }
 
+_DISABLED_TASK_DATASETS = {
+    "fever",
+    "truthful_qa",
+    "eleutherai/truthful_qa_mc",
+    "popqa",
+    "akariasai/popqa",
+    "hagrid",
+    "miracl/hagrid",
+}
+
 
 def load_dataset(
     name: str,
@@ -56,6 +60,7 @@ def load_dataset(
     dev_sample_size: Optional[int] = None,
     *,
     streaming: bool = False,
+    seed: int = 42,
 ) -> hf_datasets.Dataset:
     """Load a HuggingFace dataset with optional dev-sampling.
 
@@ -63,9 +68,12 @@ def load_dataset(
         name: Dataset identifier – one of the keys in ``_DATASET_CONFIGS``
               or any HuggingFace dataset path.
         split: Dataset split (e.g. ``"train"``, ``"validation"``).
-        dev_sample_size: If set, randomly sample this many rows (deterministic,
-                         seed=42) for fast dev iteration.
+        dev_sample_size: If set, deterministically sample this many rows using
+                         ``seed`` for fast development iteration.
         streaming: Whether to use streaming mode.
+        seed: Sampling seed used only for the development convenience sample.
+              This does not replace the protocol requirement to split a full
+              source snapshot before sampling.
 
     Returns:
         A ``datasets.Dataset`` (or ``IterableDataset`` when streaming).
@@ -76,6 +84,10 @@ def load_dataset(
         >>> len(ds) <= 50
         True
     """
+    if name.casefold() in _DISABLED_TASK_DATASETS:
+        raise NotImplementedError(
+            f"dataset {name!r} requires a task-specific prompt/prediction/evaluation adapter"
+        )
     cfg = _DATASET_CONFIGS.get(name, {"path": name, "name": None})
     logger.info("Loading dataset '%s' (split=%s) ...", name, split)
 
@@ -92,7 +104,7 @@ def load_dataset(
     ds = hf_datasets.load_dataset(**kwargs)
 
     if dev_sample_size is not None and not streaming:
-        ds = ds.shuffle(seed=42).select(range(min(dev_sample_size, len(ds))))
+        ds = ds.shuffle(seed=seed).select(range(min(dev_sample_size, len(ds))))
         logger.info("Dev-sampled to %d rows.", len(ds))
 
     return ds

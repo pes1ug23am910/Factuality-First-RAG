@@ -1,0 +1,292 @@
+{
+  "schema_version": "evaluator-sanity-v1",
+  "cases": [
+    {
+      "id": "case-001",
+      "category": "correct_supported",
+      "answer": "Paris is the capital of France.",
+      "abstained": false,
+      "claims": [
+        {
+          "id": "capital_of_france",
+          "text": "Paris is the capital of France.",
+          "citation_ids": [
+            "reference:france"
+          ]
+        }
+      ],
+      "reference_claims": [
+        "Paris is the capital of France."
+      ],
+      "evidence": [
+        {
+          "id": "reference:france",
+          "text": "Paris is the capital of France."
+        }
+      ],
+      "oracle": {
+        "claims": [
+          {
+            "claim_id": "capital_of_france",
+            "is_correct": true,
+            "entailing_evidence_ids": [
+              "reference:france"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "abstained": false,
+        "claim_count": 1,
+        "correct_claim_count": 1,
+        "supported_claim_count": 1,
+        "cited_claim_count": 1,
+        "correctness": 1.0,
+        "evidence_support": 1.0,
+        "citation_coverage": 1.0,
+        "fully_correct": true,
+        "fully_supported": true
+      }
+    },
+    {
+      "id": "case-002",
+      "category": "correct_unsupported",
+      "answer": "Water freezes at 0 degrees Celsius at standard pressure.",
+      "abstained": false,
+      "claims": [
+        {
+          "id": "water_freezing_point",
+          "text": "Water freezes at 0 degrees Celsius at standard pressure.",
+          "citation_ids": [
+            "reference:penguins"
+          ]
+        }
+      ],
+      "reference_claims": [
+        "Water freezes at 0 degrees Celsius at standard pressure."
+      ],
+      "evidence": [
+        {
+          "id": "reference:penguins",
+          "text": "Penguins are flightless seabirds."
+        },
+        {
+          "id": "reference:water",
+          "text": "Water freezes at 0 degrees Celsius at standard pressure."
+        }
+      ],
+      "oracle": {
+        "claims": [
+          {
+            "claim_id": "water_freezing_point",
+            "is_correct": true,
+            "entailing_evidence_ids": [
+              "reference:water"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "abstained": false,
+        "claim_count": 1,
+        "correct_claim_count": 1,
+        "supported_claim_count": 0,
+        "cited_claim_count": 1,
+        "correctness": 1.0,
+        "evidence_support": 0.0,
+        "citation_coverage": 1.0,
+        "fully_correct": true,
+        "fully_supported": false
+      }
+    },
+    {
+      "id": "case-003",
+      "category": "wrong_supported",
+      "answer": "The Moon is made of cheese.",
+      "abstained": false,
+      "claims": [
+        {
+          "id": "moon_composition",
+          "text": "The Moon is made of cheese.",
+          "citation_ids": [
+            "example:moon_misinformation"
+          ]
+        }
+      ],
+      "reference_claims": [
+        "The Moon is a natural satellite composed primarily of rock."
+      ],
+      "evidence": [
+        {
+          "id": "example:moon_misinformation",
+          "text": "The Moon is made of cheese."
+        }
+      ],
+      "oracle": {
+        "claims": [
+          {
+            "claim_id": "moon_composition",
+            "is_correct": false,
+            "entailing_evidence_ids": [
+              "example:moon_misinformation"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "abstained": false,
+        "claim_count": 1,
+        "correct_claim_count": 0,
+        "supported_claim_count": 1,
+        "cited_claim_count": 1,
+        "correctness": 0.0,
+        "evidence_support": 1.0,
+        "citation_coverage": 1.0,
+        "fully_correct": false,
+        "fully_supported": true
+      }
+    },
+    {
+      "id": "case-004",
+      "category": "partial_support",
+      "answer": "Mercury is the closest planet to the Sun. Venus is the hottest planet.",
+      "abstained": false,
+      "claims": [
+        {
+          "id": "mercury_closest",
+          "text": "Mercury is the closest planet to the Sun.",
+          "citation_ids": [
+            "reference:mercury"
+          ]
+        },
+        {
+          "id": "venus_hottest",
+          "text": "Venus is the hottest planet.",
+          "citation_ids": [
+            "reference:mercury"
+          ]
+        }
+      ],
+      "reference_claims": [
+        "Mercury is the closest planet to the Sun.",
+        "Venus is the hottest planet."
+      ],
+      "evidence": [
+        {
+          "id": "reference:mercury",
+          "text": "Mercury is the closest planet to the Sun."
+        },
+        {
+          "id": "reference:venus",
+          "text": "Venus is the hottest planet."
+        }
+      ],
+      "oracle": {
+        "claims": [
+          {
+            "claim_id": "mercury_closest",
+            "is_correct": true,
+            "entailing_evidence_ids": [
+              "reference:mercury"
+            ]
+          },
+          {
+            "claim_id": "venus_hottest",
+            "is_correct": true,
+            "entailing_evidence_ids": [
+              "reference:venus"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "abstained": false,
+        "claim_count": 2,
+        "correct_claim_count": 2,
+        "supported_claim_count": 1,
+        "cited_claim_count": 2,
+        "correctness": 1.0,
+        "evidence_support": 0.5,
+        "citation_coverage": 1.0,
+        "fully_correct": true,
+        "fully_supported": false
+      }
+    },
+    {
+      "id": "case-005",
+      "category": "abstention",
+      "answer": "I do not have enough evidence to answer.",
+      "abstained": true,
+      "claims": [],
+      "reference_claims": [
+        "The available material does not determine the answer."
+      ],
+      "evidence": [
+        {
+          "id": "reference:insufficient",
+          "text": "The available material does not determine the answer."
+        }
+      ],
+      "oracle": {
+        "claims": []
+      },
+      "expected": {
+        "abstained": true,
+        "claim_count": 0,
+        "correct_claim_count": 0,
+        "supported_claim_count": 0,
+        "cited_claim_count": 0,
+        "correctness": null,
+        "evidence_support": null,
+        "citation_coverage": null,
+        "fully_correct": null,
+        "fully_supported": null
+      }
+    },
+    {
+      "id": "case-006",
+      "category": "uncited_nonempty",
+      "answer": "Canberra is the capital of Australia.",
+      "abstained": false,
+      "claims": [
+        {
+          "id": "capital_of_australia",
+          "text": "Canberra is the capital of Australia.",
+          "citation_ids": []
+        }
+      ],
+      "reference_claims": [
+        "Canberra is the capital of Australia."
+      ],
+      "evidence": [
+        {
+          "id": "reference:australia",
+          "text": "Canberra is the capital of Australia."
+        }
+      ],
+      "oracle": {
+        "claims": [
+          {
+            "claim_id": "capital_of_australia",
+            "is_correct": true,
+            "entailing_evidence_ids": [
+              "reference:australia"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "abstained": false,
+        "claim_count": 1,
+        "correct_claim_count": 1,
+        "supported_claim_count": 0,
+        "cited_claim_count": 0,
+        "correctness": 1.0,
+        "evidence_support": 0.0,
+        "citation_coverage": 0.0,
+        "fully_correct": true,
+        "fully_supported": false
+      }
+    }
+  ]
+}

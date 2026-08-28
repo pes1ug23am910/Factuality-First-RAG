@@ -1,7 +1,7 @@
 # Factuality-first RAG
 """
-factuality_rag – Adaptive retrieval gating with passage-level
-provenance and factuality scoring.
+factuality_rag – Adaptive retrieval gating with heuristic evidence links
+and query-conditioned passage evidence/relevance scoring.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

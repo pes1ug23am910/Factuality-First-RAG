@@ -1,7 +1,7 @@
 """
 factuality_rag.scorer.passage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Passage-level factuality scorer: NLI entailment + token/char
+Passage-level evidence/relevance scorer: query-passage NLI + token/char
 overlap + retriever score fusion, with optional sentence-level
 NLI and cross-encoder reranking.
 
@@ -20,18 +20,28 @@ Example (mock-mode)::
 
 from __future__ import annotations
 
+import inspect
 import logging
+import math
+import numbers
 import re
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from collections.abc import Mapping
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
+from factuality_rag.determinism import stable_seed
+
 logger = logging.getLogger(__name__)
+
+PassageId = Union[str, int]
+_NLI_MAX_LENGTH = 512
+_NLI_MIN_NONEMPTY_PREMISE_TOKENS = 1
 
 
 class PassageScorer:
-    """Passage-level factuality scorer.
+    """Passage-level evidence/relevance scorer.
 
     Args:
         nli_model_hf: HuggingFace NLI model identifier.
@@ -44,6 +54,8 @@ class PassageScorer:
         nli_mode: ``"passage"`` (default) or ``"sentence"`` — controls
                   whether NLI is computed on the full passage or the
                   best-matching sentence.
+        nli_batch_size: Positive Transformers pipeline batch size used only
+                        for full-passage NLI scoring.
         cross_encoder_model: If not ``None``, rerank passages with this
                              cross-encoder **before** NLI scoring.
 
@@ -64,16 +76,41 @@ class PassageScorer:
         w_overlap: float = 0.2,
         w_ret: float = 0.3,
         nli_mode: str = "passage",
+        nli_batch_size: int = 8,
         cross_encoder_model: Optional[str] = None,
     ) -> None:
+        if overlap_metric not in {"token", "char"}:
+            raise ValueError("overlap_metric must be 'token' or 'char'")
+        if nli_mode not in {"passage", "sentence"}:
+            raise ValueError("nli_mode must be 'passage' or 'sentence'")
+        if type(mock_mode) is not bool:
+            raise TypeError("mock_mode must be exactly bool")
+        if isinstance(nli_batch_size, bool) or not isinstance(nli_batch_size, int):
+            raise TypeError("nli_batch_size must be a positive integer")
+        if int(nli_batch_size) <= 0:
+            raise ValueError("nli_batch_size must be a positive integer")
+        validated_weights: List[float] = []
+        for name, value in (
+            ("w_nli", w_nli),
+            ("w_overlap", w_overlap),
+            ("w_ret", w_ret),
+        ):
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                raise TypeError(f"{name} must be a real number")
+            numeric_value = float(value)
+            if not math.isfinite(numeric_value) or numeric_value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            validated_weights.append(numeric_value)
+        if not math.isclose(sum(validated_weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("w_nli, w_overlap, and w_ret must sum to 1")
+
         self.nli_model_hf = nli_model_hf
         self.overlap_metric = overlap_metric
         self.device = device
         self.mock_mode = mock_mode
-        self.w_nli = w_nli
-        self.w_overlap = w_overlap
-        self.w_ret = w_ret
+        self.w_nli, self.w_overlap, self.w_ret = validated_weights
         self.nli_mode = nli_mode
+        self.nli_batch_size = int(nli_batch_size)
         self.cross_encoder_model = cross_encoder_model
 
         # Lazy-loaded NLI pipeline
@@ -118,14 +155,14 @@ class PassageScorer:
         query: str,
         passages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Score each passage for factuality and add keys in-place.
+        """Score each passage for query-conditioned evidence relevance.
 
         Adds ``nli_score``, ``overlap_score``, and ``final_score``
         to each passage dict.  Optionally reranks via cross-encoder
         first and uses sentence-level NLI if configured.
 
         Args:
-            query: The user query (used as premise for NLI and for
+            query: The user query (used as the NLI hypothesis and for
                    overlap computation).
             passages: List of passage dicts; each should have at least
                       ``text`` and ``combined_score`` (from retriever).
@@ -152,25 +189,24 @@ class PassageScorer:
         ret_scores = [p.get("combined_score", 0.0) for p in passages]
         ret_min, ret_max = (min(ret_scores), max(ret_scores)) if ret_scores else (0, 1)
 
-        for p in passages:
+        passage_nli_scores: Optional[List[float]] = None
+        if self.nli_mode == "passage":
+            passage_nli_scores = self._batch_nli_entailment(
+                [(p.get("text", ""), query) for p in passages]
+            )
+
+        for passage_index, p in enumerate(passages):
             # NLI scoring (passage or sentence level)
             if self.nli_mode == "sentence":
-                nli = self._sentence_level_nli(
-                    query=query, passage_text=p.get("text", "")
-                )
+                nli = self._sentence_level_nli(query=query, passage_text=p.get("text", ""))
             else:
-                # passage-level: passage is premise (evidence), query is hypothesis
-                nli = self._nli_entailment(
-                    premise=p.get("text", ""), hypothesis=query
-                )
+                if passage_nli_scores is None:
+                    raise RuntimeError("passage-level NLI scores were not computed")
+                nli = passage_nli_scores[passage_index]
 
             overlap = self._overlap(query, p.get("text", ""))
             ret_raw = p.get("combined_score", 0.0)
-            ret_norm = (
-                (ret_raw - ret_min) / (ret_max - ret_min)
-                if ret_max > ret_min
-                else 0.5
-            )
+            ret_norm = (ret_raw - ret_min) / (ret_max - ret_min) if ret_max > ret_min else 0.5
 
             p["nli_score"] = nli
             p["overlap_score"] = overlap
@@ -202,18 +238,297 @@ class PassageScorer:
             True
         """
         if self.mock_mode:
-            rng = np.random.RandomState(abs(hash(premise + hypothesis)) % (2**31))
+            rng = np.random.RandomState(stable_seed("passage_scorer.mock_nli", premise, hypothesis))
             return float(rng.uniform(0.3, 0.95))
 
+        self._load_nli()
+        if self._nli_pipeline is None:
+            raise RuntimeError("NLI pipeline initialization did not produce a callable pipeline")
+        max_length = self._prepare_nli_max_length([(premise, hypothesis)])
         result = self._nli_pipeline(
-            f"{premise} </s></s> {hypothesis}",
+            {"text": premise, "text_pair": hypothesis},
             top_k=None,
+            truncation="only_first",
+            max_length=max_length,
         )
-        # Find 'entailment' label score
-        for item in result:
-            if "entail" in item["label"].lower():
-                return float(item["score"])
-        return 0.0
+        return self._entailment_score_from_output(result)
+
+    def _batch_nli_entailment(self, pairs: List[Tuple[str, str]]) -> List[float]:
+        """Score full-passage NLI pairs in one Transformers pipeline call.
+
+        Mock mode deliberately delegates to the public single-pair helper so
+        its stable-seed behaviour remains byte-for-byte identical. Sentence
+        mode also continues to use that helper and does not call this method.
+        """
+        if self.mock_mode:
+            return [
+                self._nli_entailment(premise=premise, hypothesis=hypothesis)
+                for premise, hypothesis in pairs
+            ]
+        if not pairs:
+            return []
+
+        self._load_nli()
+        if self._nli_pipeline is None:
+            raise RuntimeError("NLI pipeline initialization did not produce a callable pipeline")
+
+        max_length = self._prepare_nli_max_length(pairs)
+        result = self._nli_pipeline(
+            [{"text": premise, "text_pair": hypothesis} for premise, hypothesis in pairs],
+            top_k=None,
+            batch_size=self.nli_batch_size,
+            truncation="only_first",
+            max_length=max_length,
+        )
+        outputs = self._normalise_nli_batch_output(result, expected_count=len(pairs))
+        return [self._entailment_score_from_output(output) for output in outputs]
+
+    def _prepare_nli_max_length(self, pairs: List[Tuple[str, str]]) -> int:
+        """Return the model-aware pair limit after protecting hypothesis semantics.
+
+        ``only_first`` deliberately permits truncation of the evidence premise,
+        never the query/claim hypothesis. Before inference, a real Transformers
+        tokenizer is used to prove that each hypothesis, the pair's special
+        tokens, and at least one token from a non-empty premise fit intact.
+
+        Lightweight injected test doubles may omit ``tokenizer`` entirely. In
+        that case the historical application cap remains usable; production
+        Transformers pipelines expose their tokenizer and take this validation
+        path.
+        """
+        max_length = self._effective_nli_max_length()
+        tokenizer = self._declared_nli_pipeline_component("tokenizer")
+        if tokenizer is None:
+            return max_length
+
+        special_token_counter = getattr(tokenizer, "num_special_tokens_to_add", None)
+        encode = getattr(tokenizer, "encode", None)
+        if not callable(special_token_counter) or not callable(encode):
+            raise RuntimeError(
+                "NLI tokenizer must expose encode() and num_special_tokens_to_add() "
+                "to validate hypothesis length"
+            )
+
+        try:
+            pair_special_tokens = special_token_counter(pair=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "NLI tokenizer could not determine pair special-token overhead"
+            ) from exc
+        if (
+            isinstance(pair_special_tokens, bool)
+            or not isinstance(pair_special_tokens, numbers.Integral)
+            or int(pair_special_tokens) < 0
+        ):
+            raise RuntimeError("NLI tokenizer returned an invalid pair special-token count")
+        special_token_count = int(pair_special_tokens)
+
+        hypothesis_lengths: Dict[str, int] = {}
+        for premise, hypothesis in pairs:
+            if hypothesis not in hypothesis_lengths:
+                try:
+                    hypothesis_token_ids = encode(
+                        hypothesis,
+                        add_special_tokens=False,
+                        truncation=False,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "NLI tokenizer could not measure hypothesis length without truncation"
+                    ) from exc
+                if not isinstance(hypothesis_token_ids, (list, tuple)):
+                    raise RuntimeError(
+                        "NLI tokenizer returned an unsupported hypothesis token-ID shape"
+                    )
+                hypothesis_lengths[hypothesis] = len(hypothesis_token_ids)
+
+            hypothesis_token_count = hypothesis_lengths[hypothesis]
+            required_premise_tokens = _NLI_MIN_NONEMPTY_PREMISE_TOKENS if premise.strip() else 0
+            required_length = hypothesis_token_count + special_token_count + required_premise_tokens
+            if required_length > max_length:
+                raise ValueError(
+                    "NLI hypothesis is too long to score without truncating claim semantics: "
+                    f"{hypothesis_token_count} hypothesis tokens + {special_token_count} pair "
+                    f"special tokens + {required_premise_tokens} required premise tokens exceed "
+                    f"the effective model limit of {max_length}"
+                )
+        return max_length
+
+    def _effective_nli_max_length(self) -> int:
+        """Return the strictest validated application/tokenizer/model limit."""
+        candidates = [_NLI_MAX_LENGTH]
+        tokenizer = self._declared_nli_pipeline_component("tokenizer")
+        model = self._declared_nli_pipeline_component("model")
+        config = getattr(model, "config", None)
+
+        for source, value in (
+            ("tokenizer.model_max_length", getattr(tokenizer, "model_max_length", None)),
+            (
+                "model.config.max_position_embeddings",
+                getattr(config, "max_position_embeddings", None),
+            ),
+        ):
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, numbers.Integral)
+                or int(value) <= 0
+            ):
+                raise RuntimeError(f"NLI {source} must be a positive integer")
+            candidates.append(int(value))
+
+        return min(candidates)
+
+    def _declared_nli_pipeline_component(self, name: str) -> Any:
+        """Return explicit pipeline metadata without triggering dynamic test mocks."""
+        if self._nli_pipeline is None:
+            return None
+        try:
+            inspect.getattr_static(self._nli_pipeline, name)
+        except AttributeError:
+            return None
+        return getattr(self._nli_pipeline, name, None)
+
+    def _entailment_score_from_output(self, result: Any) -> float:
+        """Validate one pipeline result and return its entailment probability."""
+        items = self._normalise_nli_output(result)
+        configured_entailment_ids = self._configured_entailment_ids()
+        entailment_scores: List[float] = []
+
+        for item in items:
+            raw_label = item.get("label")
+            if not isinstance(raw_label, str) or not raw_label.strip():
+                raise RuntimeError("NLI pipeline returned an item without a valid label")
+
+            label = self._normalise_nli_label(raw_label)
+            is_entailment = label == "entailment"
+            generic_match = re.fullmatch(r"label_(\d+)", label)
+            if generic_match is not None:
+                label_id = int(generic_match.group(1))
+                is_entailment = label_id in configured_entailment_ids
+
+            if not is_entailment:
+                continue
+
+            raw_score = item.get("score")
+            if isinstance(raw_score, bool) or not isinstance(
+                raw_score, (int, float, np.integer, np.floating)
+            ):
+                raise RuntimeError("NLI pipeline returned a non-numeric entailment score")
+            score = float(raw_score)
+            if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+                raise RuntimeError("NLI pipeline returned an invalid entailment probability")
+            entailment_scores.append(score)
+
+        if len(entailment_scores) != 1:
+            raise RuntimeError(
+                "NLI output must contain exactly one unambiguous entailment label; "
+                "labels such as 'not_entailment', 'non_entailment', and unresolved "
+                "'LABEL_n' values are not entailment"
+            )
+        return entailment_scores[0]
+
+    @staticmethod
+    def _normalise_nli_batch_output(result: Any, *, expected_count: int) -> List[Any]:
+        """Require exactly one independently validated output per batch input."""
+        if not isinstance(result, list):
+            raise RuntimeError("NLI pipeline returned an unsupported batched result type")
+
+        # Some Transformers versions flatten a singleton batch's class-score
+        # list. Preserve the single-pair normaliser's accepted shape for that
+        # one unambiguous case before checking batch cardinality.
+        if expected_count == 1 and result and all(isinstance(item, Mapping) for item in result):
+            return [result]
+
+        if len(result) != expected_count:
+            raise RuntimeError(
+                "NLI pipeline batch output must contain exactly one result per input; "
+                f"expected {expected_count}, received {len(result)}"
+            )
+        return list(result)
+
+    @staticmethod
+    def _normalise_nli_output(result: Any) -> List[Mapping[str, Any]]:
+        """Normalise supported single-input Transformers output shapes.
+
+        Text-classification pipelines return either a mapping, a flat list of
+        mappings, or (in older versions) a singleton batch containing that
+        list.  Other nesting is ambiguous for this single-input call and is
+        rejected rather than flattened speculatively.
+        """
+        if isinstance(result, Mapping):
+            items: Any = [result]
+        elif isinstance(result, list):
+            items = result
+            if len(items) == 1 and isinstance(items[0], list):
+                items = items[0]
+        else:
+            raise RuntimeError("NLI pipeline returned an unsupported result type")
+
+        if not items or not all(isinstance(item, Mapping) for item in items):
+            raise RuntimeError("NLI pipeline returned an unsupported result shape")
+        return list(items)
+
+    @staticmethod
+    def _normalise_nli_label(label: str) -> str:
+        """Normalise label spelling without broad substring matching."""
+        return label.strip().casefold()
+
+    @staticmethod
+    def _coerce_config_label_id(value: Any) -> Optional[int]:
+        """Return a non-negative config class ID, or ``None`` if invalid."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
+            return int(value.strip())
+        return None
+
+    def _configured_entailment_ids(self) -> Set[int]:
+        """Return class IDs explicitly and unambiguously mapped to entailment."""
+        model = getattr(self._nli_pipeline, "model", None)
+        config = getattr(model, "config", None)
+        labels_by_id: Dict[int, Set[str]] = {}
+
+        id2label = getattr(config, "id2label", None)
+        if isinstance(id2label, Mapping):
+            for raw_id, raw_label in id2label.items():
+                label_id = self._coerce_config_label_id(raw_id)
+                if label_id is None or not isinstance(raw_label, str):
+                    continue
+                label = self._normalise_nli_label(raw_label)
+                if not re.fullmatch(r"label_\d+", label):
+                    labels_by_id.setdefault(label_id, set()).add(label)
+
+        label2id = getattr(config, "label2id", None)
+        if isinstance(label2id, Mapping):
+            for raw_label, raw_id in label2id.items():
+                label_id = self._coerce_config_label_id(raw_id)
+                if label_id is None or not isinstance(raw_label, str):
+                    continue
+                label = self._normalise_nli_label(raw_label)
+                if not re.fullmatch(r"label_\d+", label):
+                    labels_by_id.setdefault(label_id, set()).add(label)
+
+        conflicting_ids = sorted(
+            label_id
+            for label_id, labels in labels_by_id.items()
+            if "entailment" in labels and labels != {"entailment"}
+        )
+        if conflicting_ids:
+            raise RuntimeError(
+                f"NLI model config has conflicting labels for class IDs {conflicting_ids}"
+            )
+        entailment_ids = {
+            label_id for label_id, labels in labels_by_id.items() if labels == {"entailment"}
+        }
+        if len(entailment_ids) > 1:
+            raise RuntimeError(
+                f"NLI model config defines multiple entailment class IDs: {sorted(entailment_ids)}"
+            )
+        return entailment_ids
 
     # ── Overlap helper ────────────────────────────────────────
 
@@ -221,8 +536,8 @@ class PassageScorer:
     def _split_sentences(text: str) -> List[str]:
         """Split text into sentences using regex heuristics.
 
-        Handles common abbreviations (Dr., Mr., U.S., etc.) to
-        avoid spurious splits.
+        This simple punctuation/whitespace regex does not handle
+        abbreviations and therefore returns heuristic sentence units.
 
         Args:
             text: Input text.
@@ -237,7 +552,7 @@ class PassageScorer:
         """
         if not text or not text.strip():
             return []
-        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        parts = re.split(r"(?<=[.!?])\s+", text.strip())
         sentences = [p.rstrip(".!? ").strip() for p in parts if p.strip()]
         return [s for s in sentences if len(s) > 3]
 
@@ -264,10 +579,7 @@ class PassageScorer:
         if not sentences:
             return self._nli_entailment(premise=passage_text, hypothesis=query)
 
-        scores = [
-            self._nli_entailment(premise=sent, hypothesis=query)
-            for sent in sentences
-        ]
+        scores = [self._nli_entailment(premise=sent, hypothesis=query) for sent in sentences]
         return float(max(scores))
 
     def _cross_encoder_rerank(
@@ -277,8 +589,9 @@ class PassageScorer:
     ) -> List[Dict[str, Any]]:
         """Rerank passages using a cross-encoder relevance model.
 
-        Adds a ``cross_encoder_score`` key to each passage and
-        sorts descending by that score.
+        Returns shallow copies with a ``cross_encoder_score`` key, sorted
+        descending by that score.  The caller's list and dictionaries are not
+        mutated.
 
         Args:
             query: The user query.
@@ -297,19 +610,49 @@ class PassageScorer:
             >>> all("cross_encoder_score" in p for p in out)
             True
         """
+        reranked = [dict(passage) for passage in passages]
         if self.mock_mode:
-            rng = np.random.RandomState(abs(hash(query)) % (2**31))
-            for p in passages:
-                p["cross_encoder_score"] = float(rng.uniform(0.1, 0.95))
-            passages.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-            return passages
+            passage_ids: Set[PassageId] = set()
+            for passage in reranked:
+                passage_id = self._stable_passage_id(passage)
+                if passage_id in passage_ids:
+                    raise ValueError(f"duplicate passage id for mock cross-encoder: {passage_id!r}")
+                passage_ids.add(passage_id)
+                rng = np.random.RandomState(
+                    stable_seed("passage_scorer.mock_cross_encoder", query, passage_id)
+                )
+                passage["cross_encoder_score"] = float(rng.uniform(0.1, 0.95))
+            return sorted(
+                reranked,
+                key=lambda passage: (
+                    -passage["cross_encoder_score"],
+                    self._passage_id_sort_key(self._stable_passage_id(passage)),
+                ),
+            )
 
-        pairs = [(query, p.get("text", "")) for p in passages]
+        pairs = [(query, p.get("text", "")) for p in reranked]
         scores = self._cross_encoder.predict(pairs)
-        for p, score in zip(passages, scores):
+        for p, score in zip(reranked, scores):
             p["cross_encoder_score"] = float(score)
-        passages.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-        return passages
+        reranked.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
+        return reranked
+
+    @staticmethod
+    def _stable_passage_id(passage: Mapping[str, Any]) -> PassageId:
+        """Return the explicit stable ID required by deterministic mock reranking."""
+        passage_id = passage.get("id")
+        if isinstance(passage_id, bool) or not isinstance(passage_id, (str, int)):
+            raise ValueError("mock cross-encoder passages require a stable string or integer 'id'")
+        if isinstance(passage_id, str) and (not passage_id or passage_id != passage_id.strip()):
+            raise ValueError("mock cross-encoder passage 'id' must be non-empty and trimmed")
+        return passage_id
+
+    @staticmethod
+    def _passage_id_sort_key(passage_id: PassageId) -> Tuple[int, Any]:
+        """Return a total-order key for deterministic score tie-breaking."""
+        if isinstance(passage_id, int):
+            return (0, passage_id)
+        return (1, passage_id)
 
     def _overlap(self, query: str, passage: str) -> float:
         """Compute token or character overlap score.
