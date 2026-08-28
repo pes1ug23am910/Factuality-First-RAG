@@ -1,0 +1,28 @@
+# Pinned candidate constraints for JarvisLabs Linux / CPython 3.10.
+#
+# This is an online installation contract, not a hash-locked environment. uv
+# still resolves platform-specific transitive wheels. JarvisLabs directory runs
+# create a virtual environment with --system-site-packages. The clean-bundle
+# procedure copies requirements/jarvislabs-uv.toml to the bundle root as
+# uv.toml, preventing uv from shadowing the template's matched Torch stack in
+# the project venv. scripts/jarvis_preflight.py validates that inheritance
+# before real work starts. Do not run this contract without that active config.
+# The editable path below is resolved from the installer's current working
+# directory, not from this requirements file's directory. Use it through a
+# JarvisLabs directory target, or install manually only after changing to the
+# exported project root.
+
+-e .[quantization]
+
+accelerate==1.14.0
+bitsandbytes==0.49.2
+datasets==5.0.0
+faiss-cpu==1.14.3
+numpy==2.2.6
+onnxruntime==1.23.2
+pyjnius==1.7.0
+pyserini==1.2.0
+pyyaml==6.0.3
+scikit-learn==1.7.2
+sentence-transformers==5.6.0
+transformers==4.57.6

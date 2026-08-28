@@ -1,0 +1,12 @@
+# Reproducible package-resource bytes across operating systems.
+LICENSE text eol=lf
+configs/exp_*.yaml text eol=lf
+factuality_rag/resources/configs/*.yaml text eol=lf
+factuality_rag/resources/data/evaluator_sanity_v1.json text eol=lf
+tests/data/evaluator_sanity_v1.json text eol=lf
+MANIFEST.in text eol=lf
+requirements/**/*.in text eol=lf
+requirements/**/*.txt text eol=lf
+requirements/**/*.md text eol=lf
+requirements/**/*.toml text eol=lf
+*.sh text eol=lf

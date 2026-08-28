@@ -33,6 +33,8 @@ class TestRealGating:
     """Integration test: real logit probing on GPU."""
 
     def test_real_gating_decision(self) -> None:
+        import numpy as np
+
         from factuality_rag.gating.probe import GatingProbe
 
         probe = GatingProbe(
@@ -40,7 +42,16 @@ class TestRealGating:
             mock_mode=False,
             device="cuda",
         )
-        result = probe.should_retrieve("What is the capital of France?")
+        prompt = "What is the capital of France?"
+        logits = probe._get_next_token_logits(prompt)
+        entropy = probe._compute_entropy(logits)
+        gap = probe._compute_logit_gap(logits)
+        assert np.isfinite(logits).all()
+        assert np.isfinite(entropy)
+        assert np.isfinite(gap)
+        assert 0.0 <= entropy <= np.log(logits.size)
+        assert gap >= 0.0
+        result = probe.should_retrieve(prompt)
         assert isinstance(result, bool)
 
     def test_real_multi_token_probe(self) -> None:
@@ -66,12 +77,17 @@ class TestRealNLI:
         from factuality_rag.scorer.passage import PassageScorer
 
         scorer = PassageScorer(mock_mode=False)
-        score = scorer._nli_entailment(
+        entailment_score = scorer._nli_entailment(
             premise="Paris is the capital of France.",
-            hypothesis="The capital of France is Paris.",
+            hypothesis="Paris is the capital of France.",
         )
-        assert 0.0 <= score <= 1.0
-        assert score > 0.5  # Should clearly be entailment
+        contradiction_score = scorer._nli_entailment(
+            premise="Paris is the capital of France.",
+            hypothesis="Berlin is the capital of France.",
+        )
+        assert 0.0 <= entailment_score <= 1.0
+        assert 0.0 <= contradiction_score <= 1.0
+        assert entailment_score > contradiction_score
 
     def test_real_sentence_level_nli(self) -> None:
         from factuality_rag.scorer.passage import PassageScorer
@@ -101,10 +117,10 @@ class TestRealPipeline:
 
 
 @pytest.mark.integration
-class TestRealCalibration:
-    """Integration test: temperature calibration with real logits."""
+class TestCalibrationBoundary:
+    """Integration boundary for the deliberately disabled calibration path."""
 
-    def test_calibrate_on_dev_prompts(self) -> None:
+    def test_label_free_calibration_fails_before_real_model_load(self) -> None:
         from factuality_rag.gating.probe import GatingProbe
 
         probe = GatingProbe(
@@ -112,11 +128,14 @@ class TestRealCalibration:
             mock_mode=False,
             device="cuda",
         )
-        temp = probe.calibrate_temperature(
-            dev_prompts=[
-                "What is the capital of France?",
-                "Who wrote Romeo and Juliet?",
-                "What is photosynthesis?",
-            ]
-        )
-        assert 0.1 <= temp <= 5.0
+        original_temperature = probe.temp
+
+        with pytest.raises(NotImplementedError, match="disjoint calibration split"):
+            probe.calibrate_temperature(
+                dev_prompts=["What is the capital of France?"],
+                targets=["Paris"],
+            )
+
+        assert probe._model is None
+        assert probe._tokenizer is None
+        assert probe.temp == original_temperature

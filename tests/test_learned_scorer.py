@@ -98,11 +98,15 @@ class TestLearnedScorerPersistence:
         probs_before = ls.predict_proba(X)
 
         with tempfile.TemporaryDirectory() as d:
-            ls.save(d)
+            metadata_sha256 = ls.save(d)
             assert Path(d, "model.pkl").exists()
             assert Path(d, "metadata.json").exists()
 
-            ls2 = LearnedScorer.load(d)
+            ls2 = LearnedScorer.load(
+                d,
+                expected_metadata_sha256=metadata_sha256,
+                allow_unsafe_pickle=True,
+            )
             probs_after = ls2.predict_proba(X)
             np.testing.assert_allclose(probs_before, probs_after, atol=1e-10)
 
@@ -112,8 +116,12 @@ class TestLearnedScorerPersistence:
         ls.fit(X, y)
 
         with tempfile.TemporaryDirectory() as d:
-            ls.save(d)
-            ls2 = LearnedScorer.load(d)
+            metadata_sha256 = ls.save(d)
+            ls2 = LearnedScorer.load(
+                d,
+                expected_metadata_sha256=metadata_sha256,
+                allow_unsafe_pickle=True,
+            )
             assert ls2._fitted
             assert ls2.classifier_type == "mlp"
 
@@ -126,10 +134,14 @@ class TestLearnedScorerPersistence:
             ls.save(d)
             with open(Path(d, "metadata.json")) as f:
                 meta = json.load(f)
+            assert meta["schema"] == "factuality-rag.learned-scorer.v1"
             assert meta["classifier_type"] == "logreg"
+            assert len(meta["model_sha256"]) == 64
             assert "learned_weights" in meta
             assert set(meta["learned_weights"].keys()) == {
-                "nli_score", "overlap_score", "retriever_score_norm"
+                "nli_score",
+                "overlap_score",
+                "retriever_score_norm",
             }
 
 

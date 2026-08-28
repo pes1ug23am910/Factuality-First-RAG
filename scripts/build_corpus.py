@@ -31,13 +31,24 @@ logger = logging.getLogger(__name__)
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build Wikipedia corpus indexes.")
     p.add_argument("--n-docs", type=int, default=100_000, help="Number of documents to index.")
-    p.add_argument("--faiss-out", type=str, default="indexes/wiki100k.faiss", help="FAISS output path.")
-    p.add_argument("--pyserini-out", type=str, default="indexes/wiki100k_lucene", help="Pyserini Lucene output dir.")
+    p.add_argument(
+        "--faiss-out", type=str, default="indexes/wiki100k.faiss", help="FAISS output path."
+    )
+    p.add_argument(
+        "--pyserini-out",
+        type=str,
+        default="indexes/wiki100k_lucene",
+        help="Pyserini Lucene output dir.",
+    )
     p.add_argument("--embed-model", type=str, default="sentence-transformers/all-mpnet-base-v2")
     p.add_argument("--batch-size", type=int, default=64, help="Encoding batch size.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--from-jsonl", type=str, default=None,
-                   help="Load docs from existing JSONL instead of downloading.")
+    p.add_argument(
+        "--from-jsonl",
+        type=str,
+        default=None,
+        help="Load docs from existing JSONL instead of downloading.",
+    )
     return p.parse_args()
 
 
@@ -59,6 +70,12 @@ def main() -> None:
         chunker = WikiChunker(chunk_size=200, chunk_overlap=50)
         docs = chunker.load_from_hf(sample_size=args.n_docs)
         logger.info("Loaded %d documents.", len(docs))
+
+    from factuality_rag.index.builder import canonicalize_documents
+
+    docs, id_list = canonicalize_documents(docs)
+    if not docs:
+        raise ValueError("corpus must contain at least one document")
 
     # 2. Build dense FAISS index
     logger.info("Building FAISS index → %s", args.faiss_out)
@@ -91,42 +108,28 @@ def main() -> None:
 
     # Save document mapping (id → text)
     doc_map_path = faiss_path.with_suffix(".json")
-    doc_map = {str(i): {"id": d.get("id", str(i)), "text": d["text"][:500]} for i, d in enumerate(docs)}
+    doc_map = {str(i): {"id": d["id"], "text": d["text"]} for i, d in enumerate(docs)}
     with open(doc_map_path, "w", encoding="utf-8") as f:
         json.dump(doc_map, f, ensure_ascii=False)
     logger.info("Document mapping saved → %s", doc_map_path)
 
     # Save ID list for retriever compatibility
     ids_path = faiss_path.with_suffix(".ids.json")
-    id_list = [d.get("id", str(i)) for i, d in enumerate(docs)]
     with open(ids_path, "w", encoding="utf-8") as f:
         json.dump(id_list, f, ensure_ascii=False)
     logger.info("ID list saved → %s (%d ids)", ids_path, len(id_list))
 
-    # 3. Build Lucene index for BM25 (Pyserini)
+    corpus_path = faiss_path.with_suffix(".jsonl")
+    with corpus_path.open("w", encoding="utf-8") as f:
+        for doc in docs:
+            f.write(json.dumps(doc, ensure_ascii=False) + "\n")
+    logger.info("Bound corpus sidecar saved → %s", corpus_path)
+
+    # 3. Build the Lucene index for BM25 in an isolated process.
     logger.info("Building Pyserini Lucene index → %s", args.pyserini_out)
-    lucene_dir = Path(args.pyserini_out)
-    jsonl_dir = lucene_dir / "jsonl_input"
-    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    from factuality_rag.index.builder import build_pyserini_index
 
-    jsonl_path = jsonl_dir / "docs.jsonl"
-    with open(jsonl_path, "w", encoding="utf-8") as f:
-        for i, doc in enumerate(docs):
-            record = {"id": doc.get("id", str(i)), "contents": doc["text"]}
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    logger.info("Wrote %d JSONL records. Now run Pyserini indexing:", len(docs))
-    logger.info(
-        "  python -m pyserini.index.lucene "
-        "--collection JsonCollection "
-        "--input %s "
-        "--index %s "
-        "--generator DefaultLuceneDocumentGenerator "
-        "--threads 4 "
-        "--storePositions --storeDocvectors --storeRaw",
-        jsonl_dir,
-        lucene_dir,
-    )
+    build_pyserini_index(str(corpus_path), args.pyserini_out)
 
     logger.info("Done. Corpus build complete.")
 

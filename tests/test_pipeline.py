@@ -8,8 +8,6 @@ and the reusable ``Pipeline`` class.
 
 from __future__ import annotations
 
-import pytest
-
 from factuality_rag.pipeline.orchestrator import Pipeline, run_pipeline
 
 
@@ -17,9 +15,7 @@ class TestPipelineMock:
     """Integration tests for mock-mode pipeline."""
 
     def test_run_pipeline_returns_tuple(self) -> None:
-        answer, trusted, provenance, confidence = run_pipeline(
-            "What is Python?", mock_mode=True
-        )
+        answer, trusted, provenance, confidence = run_pipeline("What is Python?", mock_mode=True)
         assert isinstance(answer, str)
         assert isinstance(trusted, list)
         assert isinstance(provenance, dict)
@@ -72,3 +68,16 @@ class TestPipelineClass:
         pipe = Pipeline(mock_mode=True)
         answer, _, _, _ = pipe.run("test?", gate=False)
         assert isinstance(answer, str)
+
+    def test_pipeline_class_uses_configured_gating_default(self) -> None:
+        pipe = Pipeline(
+            mock_mode=True,
+            config={"gating": {"enabled": False}, "scorer": {"enabled": False}},
+        )
+        info = {}
+
+        pipe.run("test?", info=info)
+
+        assert info["gating_enabled"] is False
+        assert info["retrieval_triggered"] is True
+        assert info["scorer_enabled"] is False

@@ -21,22 +21,23 @@ Example::
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, List, Optional, cast
+
+from factuality_rag.abstention import CANONICAL_ABSTENTION
 
 logger = logging.getLogger(__name__)
 
 # ── Default RAG prompt template (Mistral [INST] format) ──────
 _RAG_PROMPT_TEMPLATE = (
     "<s>[INST] Answer the question using ONLY the provided context. "
-    "If the context does not support an answer, say "
-    '"I cannot answer based on the provided context."\n\n'
+    "If the context does not support an answer, say exactly "
+    f'"{CANONICAL_ABSTENTION}"\n\n'
     "Context:\n{context}\n\n"
     "Question: {query} [/INST]"
 )
 
 _RAG_PROMPT_NO_CONTEXT = (
-    "<s>[INST] Answer the following question concisely.\n\n"
-    "Question: {query} [/INST]"
+    "<s>[INST] Answer the following question concisely.\n\nQuestion: {query} [/INST]"
 )
 
 
@@ -153,9 +154,7 @@ class Generator:
         """
         import torch
 
-        inputs = self._tokenizer(prompt, return_tensors="pt").to(
-            self._model.device
-        )
+        inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
         input_length = inputs["input_ids"].shape[1]
 
         with torch.no_grad():
@@ -169,7 +168,7 @@ class Generator:
 
         # Decode only the NEW tokens (strip the prompt)
         generated_ids = outputs[0][input_length:]
-        answer = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
+        answer = cast(str, self._tokenizer.decode(generated_ids, skip_special_tokens=True))
         return answer.strip()
 
     # ── Prompt formatting ─────────────────────────────────────

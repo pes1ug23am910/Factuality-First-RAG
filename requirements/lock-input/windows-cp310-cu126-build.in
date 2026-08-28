@@ -1,0 +1,8 @@
+# Hash-lock this bootstrap separately, install it first, and build the sole
+# source-only runtime dependency (Pyserini) with --no-build-isolation.
+build==1.5.0
+setuptools==78.1.0
+wheel==0.48.0
+Cython==3.2.8
+pip==26.1.2
+truststore==0.10.4

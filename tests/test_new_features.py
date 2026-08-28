@@ -76,7 +76,8 @@ class TestCrossEncoderReranking:
 
     def test_cross_encoder_mock_adds_scores(self) -> None:
         scorer = PassageScorer(
-            "mock", mock_mode=True,
+            "mock",
+            mock_mode=True,
             cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-12-v2",
         )
         passages = [
@@ -91,7 +92,8 @@ class TestCrossEncoderReranking:
 
     def test_cross_encoder_reranks_in_score_passages(self) -> None:
         scorer = PassageScorer(
-            "mock", mock_mode=True,
+            "mock",
+            mock_mode=True,
             cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-12-v2",
         )
         passages = [
@@ -130,9 +132,9 @@ class TestComputeECE:
         ece = compute_ece(confidences, accuracies)
         assert ece > 0.0
 
-    def test_empty_input(self) -> None:
-        ece = compute_ece(np.array([]), np.array([]))
-        assert ece == 0.0
+    def test_empty_input_fails_closed(self) -> None:
+        with pytest.raises(ValueError, match="must be non-empty"):
+            compute_ece(np.array([]), np.array([]))
 
     def test_ece_range(self) -> None:
         """ECE should be in [0, 1]."""
@@ -146,6 +148,117 @@ class TestComputeECE:
         ece = compute_ece(np.array([0.8]), np.array([1.0]))
         assert isinstance(ece, float)
 
+    def test_boundary_confidences_are_included(self) -> None:
+        ece = compute_ece(
+            np.array([0.0, 1.0]),
+            np.array([0.0, 1.0]),
+            n_bins=2,
+        )
+        assert ece == pytest.approx(0.0)
+
+    @pytest.mark.parametrize(
+        "confidences,accuracies,error_type,match",
+        [
+            (
+                np.array([[0.5]]),
+                np.array([1.0]),
+                ValueError,
+                "confidences must be a one-dimensional array",
+            ),
+            (
+                np.array([0.5]),
+                np.array([[1.0]]),
+                ValueError,
+                "accuracies must be a one-dimensional array",
+            ),
+            (
+                np.array([0.5, 0.6]),
+                np.array([1.0]),
+                ValueError,
+                "must have the same length",
+            ),
+            (
+                np.array(["0.5"]),
+                np.array([1.0]),
+                TypeError,
+                "confidences must contain real numbers",
+            ),
+            (
+                np.array([True]),
+                np.array([1.0]),
+                TypeError,
+                "confidences must contain real numbers",
+            ),
+            (
+                np.array([0.5]),
+                np.array(["1"]),
+                TypeError,
+                "accuracies must contain binary numeric values",
+            ),
+            (
+                np.array([np.nan]),
+                np.array([1.0]),
+                ValueError,
+                "confidences must be finite",
+            ),
+            (
+                np.array([0.5]),
+                np.array([np.inf]),
+                ValueError,
+                "accuracies must be finite",
+            ),
+            (
+                np.array([-0.1]),
+                np.array([0.0]),
+                ValueError,
+                r"confidences must lie in \[0, 1\]",
+            ),
+            (
+                np.array([1.1]),
+                np.array([1.0]),
+                ValueError,
+                r"confidences must lie in \[0, 1\]",
+            ),
+            (
+                np.array([0.5]),
+                np.array([0.5]),
+                ValueError,
+                "accuracies must contain only 0 or 1",
+            ),
+        ],
+    )
+    def test_ece_rejects_invalid_inputs(
+        self,
+        confidences: np.ndarray,
+        accuracies: np.ndarray,
+        error_type: type[Exception],
+        match: str,
+    ) -> None:
+        with pytest.raises(error_type, match=match):
+            compute_ece(confidences, accuracies)
+
+    @pytest.mark.parametrize(
+        "n_bins,error_type",
+        [
+            (True, TypeError),
+            (1.5, TypeError),
+            ("15", TypeError),
+            (0, ValueError),
+            (-1, ValueError),
+        ],
+    )
+    def test_ece_requires_positive_integer_bin_count(
+        self,
+        n_bins: object,
+        error_type: type[Exception],
+    ) -> None:
+        with pytest.raises(error_type, match="n_bins must be a positive integer"):
+            compute_ece(
+                np.array([0.5]),
+                np.array([1.0]),
+                n_bins=n_bins,  # type: ignore[arg-type]
+            )
+
 
 # ── Multi-token probe ────────────────────────────────────────
 
@@ -157,7 +270,7 @@ class TestMultiTokenProbe:
         probe = GatingProbe("mock", mock_mode=True)
         logits_list = probe._get_multi_token_logits("hello", k=3)
         assert len(logits_list) == 3
-        assert all(isinstance(l, np.ndarray) for l in logits_list)
+        assert all(isinstance(logits, np.ndarray) for logits in logits_list)
 
     def test_multi_token_logits_different_per_step(self) -> None:
         probe = GatingProbe("mock", mock_mode=True)
@@ -221,11 +334,23 @@ class TestRealProvenance:
         prov = _build_provenance("", [{"id": "0", "text": "hi"}], scorer)
         assert prov == {}
 
+    def test_build_provenance_does_not_cite_unsupported_best_passage(self) -> None:
+        class UnsupportedScorer:
+            @staticmethod
+            def _nli_entailment(premise: str, claim: str) -> float:
+                return 0.69
+
+        prov = _build_provenance(
+            "Paris is the capital of France.",
+            [{"id": "p0", "text": "Paris is the capital of France."}],
+            UnsupportedScorer(),
+        )
+
+        assert prov == {"0": []}
+
     def test_pipeline_provenance_has_passage_ids(self) -> None:
         """run_pipeline should produce provenance with real passage IDs."""
-        answer, trusted, provenance, tag = run_pipeline(
-            "What is Python?", mock_mode=True
-        )
+        answer, trusted, provenance, tag = run_pipeline("What is Python?", mock_mode=True)
         assert isinstance(provenance, dict)
         # Provenance values should reference actual passage IDs
         if trusted and provenance:

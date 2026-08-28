@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 import sys
 
 logger = logging.getLogger("factuality_rag")
@@ -48,7 +49,9 @@ def _add_build_index_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--faiss-type", default="hnsw_flat", choices=["hnsw_flat", "ivfpq"])
     p.add_argument("--dev-sample-size", type=int, default=None, help="Limit docs for dev runs.")
     p.add_argument("--dry-run", action="store_true", help="Print plan without writing files.")
-    p.add_argument("--mock-mode", action="store_true", help="Use random embeddings; skip downloads.")
+    p.add_argument(
+        "--mock-mode", action="store_true", help="Use random embeddings; skip downloads."
+    )
     p.set_defaults(func=_cmd_build_index)
 
 
@@ -56,9 +59,13 @@ def _add_chunk_wiki_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``chunk_wiki`` sub-command."""
     p = subparsers.add_parser(
         "chunk_wiki",
-        help="Chunk a Wikipedia dump (or mock articles) into JSONL.",
+        help="Generate explicitly marked synthetic chunks in --mock-mode.",
     )
-    p.add_argument("--input", default=None, help="Path to Wikipedia XML dump (optional).")
+    p.add_argument(
+        "--input",
+        default=None,
+        help="Reserved for a future real dump parser; currently fails closed.",
+    )
     p.add_argument("--output", default="data/wiki_chunks.jsonl", help="Output JSONL path.")
     p.add_argument("--chunk-size", type=int, default=200, help="Tokens per chunk.")
     p.add_argument("--chunk-overlap", type=int, default=50, help="Overlap tokens.")
@@ -75,7 +82,11 @@ def _add_run_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--k", type=int, default=10, help="Number of passages to retrieve.")
     p.add_argument("--no-gate", action="store_true", help="Disable gating probe.")
     p.add_argument("--score-threshold", type=float, default=0.4)
-    p.add_argument("--config", default="configs/exp_sample.yaml", help="YAML config path.")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="Explicit YAML config path (omitted: packaged exp_sample.yaml).",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--mock-mode", action="store_true")
     p.set_defaults(func=_cmd_run)
@@ -86,6 +97,12 @@ def _add_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("evaluate", help="Evaluate predictions JSONL.")
     p.add_argument("--predictions", required=True, help="Path to predictions JSONL.")
     p.add_argument("--references", default=None, help="Path to references (one per line).")
+    p.add_argument(
+        "--support-metric",
+        choices=["none", "lexical"],
+        default="none",
+        help="Optional lexical support proxy; NLI FactScore is not available here.",
+    )
     p.set_defaults(func=_cmd_evaluate)
 
 
@@ -94,7 +111,7 @@ def _add_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_build_index(args: argparse.Namespace) -> None:
     """Handle ``build_index`` command."""
-    from factuality_rag.index.builder import build_faiss_index, prepare_pyserini_collection
+    from factuality_rag.index.builder import build_faiss_index, build_pyserini_index
 
     if args.dry_run:
         logger.info(
@@ -103,7 +120,7 @@ def _cmd_build_index(args: argparse.Namespace) -> None:
             args.faiss_out,
         )
         logger.info(
-            "[DRY RUN] Would prepare Pyserini collection → '%s'",
+            "[DRY RUN] Would build Pyserini Lucene index → '%s'",
             args.pyserini_out,
         )
         return
@@ -118,12 +135,15 @@ def _cmd_build_index(args: argparse.Namespace) -> None:
     )
     logger.info("FAISS index saved: %s", faiss_path)
 
-    pyserini_path = prepare_pyserini_collection(
-        jsonl_path=args.corpus,
+    # FAISS writes the validated, ID-canonical corpus beside the index.  Build
+    # Lucene from that exact sidecar so dense and sparse results share one
+    # document identity/order contract, including development sampling.
+    canonical_corpus = str(Path(faiss_path).with_suffix(".jsonl"))
+    pyserini_path = build_pyserini_index(
+        jsonl_path=canonical_corpus,
         out_dir=args.pyserini_out,
-        dev_sample_size=args.dev_sample_size,
     )
-    logger.info("Pyserini collection saved: %s", pyserini_path)
+    logger.info("Pyserini Lucene index saved: %s", pyserini_path)
 
 
 def _cmd_chunk_wiki(args: argparse.Namespace) -> None:
@@ -138,15 +158,19 @@ def _cmd_chunk_wiki(args: argparse.Namespace) -> None:
         dev_sample_size=args.dev_sample_size,
     )
 
-    # If no input dump provided, generate mock articles
-    if args.input is None or args.mock_mode:
-        n = args.dev_sample_size or 20
-        articles = chunker.generate_mock_articles(n)
-        logger.info("Using %d mock articles.", len(articles))
-    else:
-        # TODO: implement real Wikipedia XML dump parsing
-        logger.error("Real Wikipedia dump parsing not yet implemented. Use --mock-mode.")
-        sys.exit(1)
+    if not args.mock_mode:
+        raise RuntimeError(
+            "chunk_wiki has no real dump parser; use scripts/build_corpus.py for the "
+            "current HuggingFace acquisition path, or pass --mock-mode for synthetic data"
+        )
+    if args.input is not None:
+        raise ValueError(
+            "--input cannot be combined with --mock-mode; synthetic input is generated"
+        )
+
+    n = args.dev_sample_size or 20
+    articles = chunker.generate_mock_articles(n)
+    logger.info("Using %d explicitly synthetic mock articles.", len(articles))
 
     chunks = chunker.process_articles(articles, output_path=args.output)
     logger.info("Generated %d chunks → %s", len(chunks), args.output)
@@ -169,19 +193,18 @@ def _cmd_run(args: argparse.Namespace) -> None:
         score_threshold=args.score_threshold,
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Query:       {args.query}")
     print(f"Answer:      {answer}")
     print(f"Confidence:  {confidence}")
     print(f"Trusted:     {len(trusted)} passage(s)")
     print(f"Provenance:  {provenance}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 def _cmd_evaluate(args: argparse.Namespace) -> None:
     """Handle ``evaluate`` command."""
     import json
-    from pathlib import Path
 
     from factuality_rag.eval.metrics import evaluate_predictions
 
@@ -196,13 +219,22 @@ def _cmd_evaluate(args: argparse.Namespace) -> None:
     references = None
     if args.references:
         ref_path = Path(args.references)
-        if ref_path.exists():
-            with open(ref_path, encoding="utf-8") as f:
-                references = [line.strip() for line in f]
+        if not ref_path.is_file():
+            logger.error("References file not found: %s", ref_path)
+            sys.exit(1)
+        with open(ref_path, encoding="utf-8") as f:
+            references = [line.strip() for line in f]
 
-    metrics = evaluate_predictions(predictions, references)
+    metrics = evaluate_predictions(
+        predictions,
+        references,
+        support_metric=args.support_metric,
+    )
     for k, v in metrics.items():
-        print(f"  {k}: {v:.4f}")
+        if isinstance(v, float):
+            print(f"  {k}: {v:.4f}")
+        else:
+            print(f"  {k}: {v}")
 
 
 # ── Main ──────────────────────────────────────────────────────

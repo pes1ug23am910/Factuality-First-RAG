@@ -6,6 +6,8 @@ Unit tests for PassageScorer in mock-mode.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from factuality_rag.scorer.passage import PassageScorer
@@ -74,3 +76,35 @@ class TestPassageScorerMock:
         # premise should be the passage text, hypothesis should be the query
         assert calls[0][0] == "The passage text"
         assert calls[0][1] == "The query"
+
+    @pytest.mark.parametrize("value", ["tokens", "", None, 1])
+    def test_overlap_metric_typo_fails_closed(self, value: object) -> None:
+        with pytest.raises(ValueError, match="overlap_metric"):
+            PassageScorer(mock_mode=True, overlap_metric=value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["sentences", "", None, 1])
+    def test_nli_mode_typo_fails_closed(self, value: object) -> None:
+        with pytest.raises(ValueError, match="nli_mode"):
+            PassageScorer(mock_mode=True, nli_mode=value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "weights,error_type",
+        [
+            ((-0.1, 0.5, 0.6), ValueError),
+            ((math.nan, 0.5, 0.5), ValueError),
+            ((math.inf, 0.0, 0.0), ValueError),
+            ((0.4, 0.2, 0.3), ValueError),
+            ((True, 0.0, 0.0), TypeError),
+            (("0.5", 0.2, 0.3), TypeError),
+        ],
+    )
+    def test_invalid_fusion_weights_fail_closed(
+        self, weights: tuple[object, object, object], error_type: type[Exception]
+    ) -> None:
+        with pytest.raises(error_type, match="w_nli|sum to 1"):
+            PassageScorer(
+                mock_mode=True,
+                w_nli=weights[0],  # type: ignore[arg-type]
+                w_overlap=weights[1],  # type: ignore[arg-type]
+                w_ret=weights[2],  # type: ignore[arg-type]
+            )

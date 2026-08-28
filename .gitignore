@@ -88,3 +88,36 @@ huggingface_cache/
 .env
 *.key
 *.pem
+
+# ========================
+# Private agent/process material — never publish
+# ========================
+AGENTS.md
+CLAUDE.md
+INSTRUCTIONS.md
+PROGRESS.md
+.agents/
+.claude/
+.codex/
+.cursor/
+.agent_tmp/
+# Generated only inside clean Jarvis upload bundles; never activate in checkout.
+/uv.toml
+docs/CLAUDE_VALIDATION_PROMPT*.md
+docs/NEXT_SESSION_PROMPT*.md
+docs/SESSION*_PROMPT.md
+docs/SESSION_LOG.md
+docs/STATUS_TRACKER*.md
+docs/SUGGESTIONS*.md
+
+# Private review, planning, and operational protocol material
+*Review-Transcript*.md
+GPT-*-Review-Transcript.md
+OLD_README.md
+OLD-2-README.md
+docs/EXPERIMENT_PLAN.md
+docs/EXPERIMENT_RUNBOOK*.md
+docs/PAPER_OUTLINE*.md
+docs/PROTOCOL_G0_DRAFT.md
+configs/protocol_g0_draft.yaml
+tests/test_protocol_g0_contract.py

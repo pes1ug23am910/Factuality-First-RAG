@@ -1,0 +1,23 @@
+include LICENSE
+include pyproject.toml
+# Root Markdown is deny-by-default; re-include only the public README.
+exclude *.md
+include README.md
+
+recursive-include factuality_rag *.py
+recursive-include factuality_rag/resources *.yaml *.json
+
+prune tests
+prune configs
+prune docs
+prune scripts
+prune requirements
+prune .*
+prune build
+prune dist
+
+global-exclude *.py[cod]
+global-exclude *~
+global-exclude .coverage
+global-exclude .DS_Store
+global-exclude Thumbs.db

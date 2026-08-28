@@ -6,7 +6,8 @@ dry-run, and dev-sample-size support.
 
 JSONL output schema::
 
-    {"id": str, "title": str, "text": str, "tokens": int, "source": "enwiki"}
+    {"id": str, "title": str, "text": str, "tokens": int,
+     "source": str, "mock_mode": bool}
 
 Example (CLI)::
 
@@ -67,9 +68,7 @@ class WikiChunker:
 
     # ── Core chunking ─────────────────────────────────────────
 
-    def chunk_text(
-        self, title: str, text: str
-    ) -> Generator[Dict[str, Any], None, None]:
+    def chunk_text(self, title: str, text: str) -> Generator[Dict[str, Any], None, None]:
         """Split *text* into overlapping token-window chunks.
 
         Args:
@@ -78,7 +77,7 @@ class WikiChunker:
 
         Yields:
             Dict matching the JSONL schema:
-            ``{"id","title","text","tokens","source"}``.
+            ``{"id","title","text","tokens","source","mock_mode"}``.
 
         Example::
 
@@ -99,12 +98,14 @@ class WikiChunker:
                 continue
             self._seen_checksums.add(checksum)
 
+            source = "synthetic-wikipedia-mock" if self.mock_mode else "enwiki"
             yield {
-                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"enwiki:{title}:{start}")),
+                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{title}:{start}")),
                 "title": title,
                 "text": chunk_text,
                 "tokens": len(chunk_tokens),
-                "source": "enwiki",
+                "source": source,
+                "mock_mode": self.mock_mode,
             }
 
     # ── Streaming JSONL writer ────────────────────────────────
@@ -240,7 +241,10 @@ class WikiChunker:
             sample_size or "ALL",
         )
         wiki = load_dataset(
-            "wikimedia/wikipedia", wiki_config, split="train", streaming=True,
+            "wikimedia/wikipedia",
+            wiki_config,
+            split="train",
+            streaming=True,
         )
 
         def _article_iter():
@@ -256,7 +260,5 @@ class WikiChunker:
             output_path = f"data/wiki_{tag}_chunks.jsonl"
 
         chunks = self.process_articles(_article_iter(), output_path=output_path)
-        logger.info(
-            "HF Wikipedia: %d chunks written to %s", len(chunks), output_path
-        )
+        logger.info("HF Wikipedia: %d chunks written to %s", len(chunks), output_path)
         return chunks
