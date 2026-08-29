@@ -33,7 +33,8 @@ def _request_json(**overrides: Any) -> str:
 def _java_home(tmp_path: Path, version: str = "21.0.12") -> Path:
     java_home = tmp_path / f"jdk-{version}"
     (java_home / "bin").mkdir(parents=True)
-    (java_home / "bin" / "java.exe").write_bytes(b"test executable marker")
+    java_name = "java.exe" if sys.platform == "win32" else "java"
+    (java_home / "bin" / java_name).write_bytes(b"test executable marker")
     (java_home / "release").write_text(
         f'IMPLEMENTOR="Test"\nJAVA_VERSION="{version}"\n', encoding="utf-8"
     )
