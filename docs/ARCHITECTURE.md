@@ -1,446 +1,331 @@
 # Architecture — Factuality-First RAG
 
-> Version 0.3.0 · March 2026 (Session 3)
+> Version 0.4.0 · implemented research-stage architecture
 
----
+## 1. Scope
 
-## 1. System Overview
+The shipped system is a research prototype for adaptive retrieval and passage
+evidence selection. It decides whether to retrieve from generator uncertainty,
+fuses dense and sparse candidates, scores passages against the query, and
+generates with selected context when available.
 
-Factuality-First RAG is a 4-stage pipeline that prioritises **factual correctness** over blind retrieval. Unlike standard RAG ("always retrieve, then generate"), this system:
+Query–passage NLI is an evidence/relevance signal, not certification that a
+generated answer is factually correct. The returned confidence tag is
+qualitative and is not a calibrated probability.
 
-1. **Decides whether to retrieve** (gating) based on the generator's own uncertainty.
-2. **Retrieves candidates** via hybrid dense + sparse search.
-3. **Scores each passage for factuality** before the generator ever sees it.
-4. **Generates conditioned only on trusted evidence**, with a confidence label attached.
+### Public future-work boundary
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                        USER QUERY                                       │
-└──────────────┬───────────────────────────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────┐     confident      ┌─────────────────────┐
-│   STAGE 1: GATING PROBE  │ ──────────────────▶ │  Direct Generation  │
-│  (entropy + logit gap)   │                     │  confidence = high  │
-└──────────────┬───────────┘                     └─────────────────────┘
-               │ uncertain
-               ▼
-┌──────────────────────────┐
-│  STAGE 2: HYBRID RETRIEVAL│
-│  Dense (FAISS/HNSW)      │
-│  + Sparse (BM25/Pyserini)│
-│  → top-K candidates      │
-└──────────────┬───────────┘
-               │
-               ▼
-┌──────────────────────────┐
-│ STAGE 3: PASSAGE SCORING │
-│  NLI entailment P(ent)   │
-│  + token overlap F1      │
-│  + retriever score norm  │
-│  → final_score per psg   │
-│  → filter by threshold   │
-└──────────────┬───────────┘
-               │
-               ▼
-┌──────────────────────────┐
-│ STAGE 4: GENERATION      │
-│  Conditioned on trusted  │
-│  passages only           │
-│  → answer + provenance   │
-│  → confidence tag        │
-└──────────────────────────┘
-```
+Future work may split retrieval into a genuine BM25-first stage that can stop
+before dense work and add a separate verifier-assisted answer-or-abstain path.
+The current retriever always executes dense and sparse search in one call, and
+that controller and verifier are not implemented.
 
----
+## 2. Runtime data flow
 
-## 2. Module Architecture
+~~~mermaid
+flowchart TD
+    Q["User query"] --> G{"Entropy / logit-gap gate"}
+    G -->|"confident"| N["No-context generation"]
+    G -->|"uncertain"| R["Hybrid retrieval<br/>FAISS + Lucene BM25"]
+    R --> S["Passage scoring<br/>NLI + overlap + retrieval"]
+    S --> F{"Score meets threshold?"}
+    F -->|"one or more"| C["Context-conditioned generation"]
+    F -->|"none"| N
+    C --> O["Answer + selected passages<br/>+ heuristic evidence links + tag"]
+    N --> O
+~~~
 
-```
+The gate probes the same no-context instruction prompt that generation would
+receive after a retrieval skip. Retrieval is requested when either:
+
+- entropy exceeds <code>entropy_thresh</code>; or
+- the top-two logit gap is below <code>logit_gap_thresh</code>.
+
+With the shipped defaults those thresholds are 1.2 and 2.0. A disabled gate
+always proceeds to retrieval. A request with <code>k=0</code> produces no
+retrieval candidates and therefore uses no-context generation.
+
+## 3. Module map
+
+~~~text
 factuality_rag/
-│
-├── model_registry.py ─ Shared model layer (NEW)
-│                       Singleton registry for loaded models & tokenizers
-│
-├── data/            ─── Data ingestion layer
-│   ├── loader.py         HuggingFace dataset wrapper
-│   └── wikipedia.py      Wiki chunker (JSONL streaming) + HF loading
-│
-├── index/           ─── Index construction layer
-│   └── builder.py        FAISS (HNSW/IVFPQ) + Pyserini prep
-│
-├── retriever/       ─── Retrieval layer
-│   └── hybrid.py         HybridRetriever (dense + BM25 fusion)
-│
-├── gating/          ─── Decision layer
-│   └── probe.py          GatingProbe (entropy/logit-gap) + model registry
-│
-├── scorer/          ─── Evidence evaluation layer
-│   └── passage.py        PassageScorer (NLI + overlap + ret)
-│
-├── generator/       ─── Generation layer
-│   └── wrapper.py        Generator (Mistral [INST] template + model registry)
-│
-├── pipeline/        ─── Orchestration layer
-│   └── orchestrator.py   Pipeline class + run_pipeline()
-│
-├── eval/            ─── Evaluation layer
-│   └── metrics.py        EM, F1, FactScore (claim decomposition + NLI)
-│
-├── cli/             ─── User interface layer
-│   └── __main__.py       CLI commands (argparse)
-│
-└── experiment_runner.py ─ Reproducibility layer
-                          Metadata tracking, run persistence
+├── abstention.py              # Canonical abstention text and matcher
+├── data/
+│   ├── loader.py              # Dataset adapters
+│   ├── splits.py              # Dataset split artifacts
+│   └── wikipedia.py           # Wikipedia chunking
+├── index/builder.py           # FAISS and Lucene index construction
+├── retriever/
+│   ├── hybrid.py              # Dense+sparse retrieval and fusion
+│   └── pyserini_worker.py     # Isolated Anserini search boundary
+├── gating/probe.py            # Entropy/logit-gap retrieval gate
+├── scorer/
+│   ├── passage.py             # NLI, overlap, and retrieval fusion
+│   └── learned_scorer.py      # Optional authenticated scorer loading
+├── generator/wrapper.py       # Prompt formatting and causal-LM generation
+├── pipeline/orchestrator.py   # Functional and reusable pipeline APIs
+├── eval/                      # Answer, support, and retrieval metrics
+├── experiment_runner.py       # Durable checkpoints, resume, and run outputs
+├── model_registry.py          # Shared model/tokenizer cache
+└── reproducibility.py         # Artifact identities and manifest validation
+~~~
 
-scripts/               ─── Analysis & experiment tooling (NEW v0.3)
-├── build_corpus.py        Wikipedia ingestion + index building
-├── analyze_gating.py      Phase 4A gating oracle analysis
-├── analyze_scorer.py      Phase 4B scorer AUC analysis
-├── analyze_errors.py      Phase 4C error taxonomy
-├── tune_scorer_weights.py Phase 5A-3 weight grid search
-├── aggregate_results.py   Cross-seed metric aggregation
-└── bootstrap_test.py      Paired bootstrap significance test
-```
+Large model weights, corpora, generated indexes, and run directories are
+external artifacts rather than package resources.
 
----
+## 4. Components
 
-## 3. Data Flow Diagram
+### 4.1 Gating probe
 
-```
-Wikipedia Dump ──▶ WikiChunker ──▶ wiki_chunks.jsonl
-                                        │
-                        ┌───────────────┼───────────────┐
-                        ▼               ▼               ▼
-                  build_faiss_index  save_embeddings  prepare_pyserini
-                        │               │               │
-                        ▼               ▼               ▼
-                  faiss.index      embeddings.npy   pyserini_dir/
-                        │                               │
-                        └───────────┬───────────────────┘
-                                    ▼
-                             HybridRetriever
-                                    │
-                              ┌─────┴─────┐
-                              ▼           ▼
-                         FAISS search  BM25 search
-                              │           │
-                              └─────┬─────┘
-                                    ▼
-                          Score normalisation
-                      (min-max → [0,1] per query)
-                                    │
-                                    ▼
-                    combined = α·dense + (1-α)·bm25
-                                    │
-                                    ▼
-                          PassageScorer (NLI + overlap)
-                                    │
-                                    ▼
-                     Filter: final_score ≥ threshold
-                                    │
-                                    ▼
-                          Generator (trusted passages)
-                                    │
-                                    ▼
-                          (answer, provenance, confidence)
-```
+<code>GatingProbe</code> reads the configured causal model's next-token logits,
+applies the configured softmax temperature, and calculates:
 
----
+- entropy over the vocabulary distribution; and
+- the difference between the two largest logits.
 
-## 4. Component Details
+The default <code>probe_tokens=1</code> uses one position. Larger values run an
+autoregressive greedy probe and average both signals across positions. A fixed
+softmax temperature is only an input to the calculation; it does not establish
+calibration.
 
-### 4.1 Gating Probe
+The probe and generator lazy-load through the same model registry, so compatible
+requests share model and tokenizer objects. Cache requests with incompatible
+device, precision, or remote-code settings fail rather than reuse mismatched
+objects.
 
-**Purpose:** Avoid retrieval when the generator is already confident.
+### 4.2 Hybrid retrieval
 
-**Mechanism:**
-1. Forward the prompt through the generator (single step — next token only).
-2. Compute **entropy** $H = -\sum_i p_i \log p_i$ of the softmax distribution.
-3. Compute **logit gap** $\Delta = \text{logit}_1 - \text{logit}_2$ (top-2 difference).
-4. Decision: `retrieve = (H > entropy_thresh) OR (Δ < logit_gap_thresh)`.
+#### Dense path
 
-**Multi-token probe (new in v0.3):** When `probe_tokens > 1`, the probe runs an autoregressive loop over k positions (greedy argmax at each step), computing entropy and logit gap at each position. The final decision uses the *averaged* entropy and logit gap across all k positions. This produces a more stable gating signal — first-token entropy is noisy for factoid queries; averaging over 3-5 positions significantly reduces false skips.
+The query is encoded with the configured sentence-transformer and searched
+against the bound FAISS index. The loader validates that vectors, ordered
+document IDs, and passage texts align exactly.
 
-**Real ECE calibration (v0.3):** `calibrate_temperature()` now uses binned Expected Calibration Error (Guo et al., 2017) instead of the earlier entropy std-dev proxy. `compute_ece(confidences, accuracies, n_bins=15)` partitions [0,1] into equal bins and computes the weighted average of |avg_confidence − avg_accuracy| per bin. Temperature $T$ is chosen to minimise ECE on the dev set.
+- Inner-product indexes use L2-normalized query vectors.
+- Squared-L2 distances are negated before score fusion so larger values remain
+  better.
+- Unknown FAISS metrics fail rather than being interpreted heuristically.
 
-**Cost:** Single-token: ~50ms on A100. Multi-token (k=3): ~150ms — still cheap compared to retrieval.
+#### Sparse path
 
-```
-Input prompt
-     │
-     ▼
-┌─────────────┐
-│ Forward pass │──▶ logits (vocab_size,)
-└─────────────┘         │
-                   ┌────┴────┐
-                   ▼         ▼
-            entropy(H)   logit_gap(Δ)
-                   │         │
-                   └────┬────┘
-                        ▼
-               H > θ_H  OR  Δ < θ_Δ ?
-                  │              │
-                 YES            NO
-                  ▼              ▼
-              RETRIEVE      SKIP (direct gen)
-```
+Sparse search is Lucene BM25 through Pyserini's Java bridge to Anserini
+<code>io.anserini.search.SimpleSearcher</code>.
 
-### 4.2 Hybrid Retriever
+On Windows, each request runs behind the short-lived
+<code>pyserini_worker</code> process boundary. The parent binds the request to
+the resolved index, enforces size and timeout limits, and validates the
+single-response JSON before accepting hits. On other platforms the retriever
+lazy-loads and caches the same Anserini class in process.
 
-**Dense path:** Encode query with SentenceTransformer → search FAISS index → get (distance, idx) pairs.
+Real sparse retrieval requires a readable Lucene index and Java 21. The worker
+uses <code>FACTUALITY_RAG_JAVA_HOME</code> when set, otherwise
+<code>JAVA_HOME</code>. Missing or malformed sparse state fails closed rather
+than silently relabelling a dense-only result as hybrid retrieval.
 
-**Sparse path:** BM25 via Pyserini `LuceneSearcher` (or mock scores in dev mode).
+#### Fusion
 
-**Score normalisation (per query):**
+Dense and sparse top-k results are unioned by document ID. With normalization
+enabled, each source is min-max scaled per query, and constant non-empty source
+scores map to 1.0. Missing-source contributions map to 0.0.
 
-$$\text{dense\_norm}_i = \frac{\text{dense}_i - \min(\text{dense})}{\max(\text{dense}) - \min(\text{dense})}$$
+<code>combined = alpha*dense_component + (1-alpha)*bm25_component</code>
 
-$$\text{bm25\_norm}_i = \frac{\text{bm25}_i - \min(\text{bm25})}{\max(\text{bm25}) - \min(\text{bm25})}$$
+The default <code>alpha</code> is 0.6. Both searches occur before fusion, so
+setting <code>alpha=0</code> changes ranking weights but does not avoid dense
+encoding or FAISS search.
 
-$$\text{combined}_i = \alpha \cdot \text{dense\_norm}_i + (1-\alpha) \cdot \text{bm25\_norm}_i$$
+### 4.3 Passage evidence scorer
 
-Default $\alpha = 0.6$ (tunable in config).
+The scorer treats the passage as NLI premise and the query as hypothesis. Its
+default fusion is:
 
-### 4.3 Passage Scorer
+<code>final_score = 0.5*nli + 0.2*overlap + 0.3*retriever</code>
 
-**Components:**
+The retriever contribution is normalized again across the candidate set. If all
+candidate combined scores are equal, each receives 0.5 for this scorer term.
+Passages below the effective threshold, 0.4 by default, are removed before
+generation.
 
-| Signal | Source | Range | Weight |
-|--------|--------|-------|--------|
-| NLI entailment | RoBERTa-MNLI `P(entailment \| query, passage)` | [0,1] | w_nli = 0.5 |
-| Token overlap | F1 of query tokens vs passage tokens | [0,1] | w_overlap = 0.2 |
-| Retriever score | Normalised `combined_score` from retriever | [0,1] | w_ret = 0.3 |
+Two NLI modes are available:
 
-**Fusion:**
+- <code>passage</code> builds all passage/query pairs and sends them through one
+  Transformers pipeline call. The positive <code>nli_batch_size</code> controls
+  that call's batching and defaults to 8.
+- <code>sentence</code> splits passage text with the lightweight regex unit
+  splitter and uses the largest single-unit entailment score. It uses the
+  single-pair scoring path.
 
-$$\text{final\_score} = w_{\text{nli}} \cdot P(\text{ent}) + w_{\text{overlap}} \cdot \text{overlap} + w_{\text{ret}} \cdot \text{ret\_norm}$$
+The real NLI path protects the hypothesis from truncation with
+<code>truncation="only_first"</code>, validates model-aware sequence limits, and
+requires one unambiguous entailment probability per input. Mock scores are
+deterministic for fixed inputs.
 
-**Filtering:** Passages with `final_score < threshold` (default 0.4) are dropped before generation.
+When configured, a cross-encoder first reorders the complete retrieved list.
+It does not apply a second top-k truncation; every reordered passage proceeds to
+the NLI scorer.
 
-**Sentence-level NLI (v0.3):** When `nli_mode="sentence"`, the scorer splits each passage into individual sentences (regex-based with abbreviation handling) and scores each sentence independently via NLI. The passage receives the *maximum* sentence-level entailment score. This addresses the issue where a passage with one highly relevant sentence surrounded by irrelevant content would score low at the passage level.
+### 4.4 Generator and model registry
 
-**Cross-encoder reranking (v0.3):** When `cross_encoder_model` is set (e.g., `"cross-encoder/ms-marco-MiniLM-L-12-v2"`), a cross-encoder reranking stage runs *before* NLI scoring. The cross-encoder attends jointly to query and passage, producing more accurate relevance scores than bi-encoder retrieval. Passages are re-sorted by cross-encoder score and only the top-k are passed to NLI, reducing computational cost.
+The current orchestrator constructs <code>Generator</code> with its wrapper
+defaults:
 
-```
-Retrieve top-20 (bi-encoder) → Cross-encoder rerank → Take top-10 → NLI scorer
-```
+| Setting | Effective value |
+|---|---|
+| Model | <code>mistralai/Mistral-7B-Instruct-v0.3</code> |
+| Device | <code>cuda</code> |
+| <code>max_new_tokens</code> | 256 |
+| <code>temperature</code> | 0.1 |
+| <code>do_sample</code> | <code>false</code> |
 
-### 4.4 Generator
+These decoding values currently live in code rather than the YAML pipeline
+configuration. The generation call passes the temperature with a minimum value
+of 0.0001, uses the tokenizer's end-of-sequence token for padding, and decodes
+only tokens generated after the prompt.
 
-Real integration with Mistral-7B-Instruct-v0.3 via model registry.
+With context, the instruction says to answer only from that context and to emit
+the exact canonical abstention when support is absent:
 
-**Prompt template (RAG with context):**
-```
-<s>[INST] Answer the question using ONLY the provided context.
-If the context does not support an answer, say "I cannot answer based on the provided context."
+~~~text
+I cannot answer based on the provided context.
+~~~
 
-Context:
-{context}
+Without selected context, the prompt asks for a concise answer. The current API
+does not produce structured citations.
 
-Question: {query} [/INST]
-```
+Model loading requests 4-bit weights by default through:
 
-**Prompt template (no context):**
-```
-<s>[INST] Answer the following question concisely and accurately.
+<code>BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=float16)</code>
 
-Question: {query} [/INST]
-```
+Missing bitsandbytes or Accelerate support fails before loading; there is no
+automatic full-precision fallback in the pipeline path. Direct registry callers
+may explicitly request <code>quantize_4bit=False</code>.
 
-**Generation config:** `max_new_tokens=256`, `temperature=0.1`, `do_sample=False`.
+### 4.5 Orchestrator and return value
 
-**Model loading:** Uses `model_registry.get_model()` for singleton loading with optional 4-bit quantization via `BitsAndBytesConfig`. Accepts pre-loaded `model`/`tokenizer` kwargs for `Pipeline` reuse.
+Two entry points expose the same pipeline:
 
-### 4.5 Model Registry
+- <code>run_pipeline()</code> is the functional interface and accepts optional
+  prebuilt components.
+- <code>Pipeline</code> creates reusable wrappers once while keeping heavy
+  models and indexes lazy-loaded.
 
-**Purpose:** Avoid loading 7B models multiple times across pipeline components.
+Both return:
 
-```
-model_registry.py
-├── _models: Dict[str, Any]       ─ Module-level singleton
-├── _tokenizers: Dict[str, Any]   ─ Module-level singleton
-├── get_model(model_id, device, quantize_4bit) → model
-├── get_tokenizer(model_id) → tokenizer
-├── clear_registry() → None
-└── is_loaded(model_id) → bool
-```
+~~~text
+(answer, selected_passages, provenance, confidence_tag)
+~~~
 
-**Quantization:** When `quantize_4bit=True`, loads with `BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=float16)`. Graceful fallback if `bitsandbytes` not installed.
+The compatibility field <code>provenance</code> contains model-derived
+sentence-unit-to-passage evidence links. Answer text is split into lightweight
+regex units; a supported unit maps to one best-scoring passage ID, and an
+unsupported unit maps to an empty list. The ordered NLI batch hook is used when
+it is compatible with any scorer customization.
 
-**Sharing pattern:** `Pipeline.__init__()` loads the model once via registry. Both `Generator` and `GatingProbe` receive the same model/tokenizer instance.
-
-### 4.6 Pipeline Orchestrator
-
-**Two interfaces:**
-
-1. **`run_pipeline()`** — functional interface, builds or accepts components:
-```python
-def run_pipeline(query, k=10, gate=True, score_threshold=0.4,
-                 config_path="configs/exp_sample.yaml", seed=42,
-                 mock_mode=False, *,
-                 probe=None, retriever=None, scorer=None, generator=None)
-    → (answer, trusted_passages, provenance, confidence_tag)
-```
-
-2. **`Pipeline` class** — loads all components once at init:
-```python
-pipe = Pipeline(config_path="configs/exp_sample.yaml", mock_mode=True)
-result1 = pipe.run("What is DNA?")
-result2 = pipe.run("Who discovered gravity?")  # reuses same models
-```
-
-**Confidence tag logic (updated):**
+These links are not atomic-fact decomposition or human-adjudicated provenance.
+The confidence tag is assigned as follows:
 
 | Condition | Tag |
-|-----------|-----|
-| Gating said "skip" (model confident) | `"medium"` |
-| avg(final_score of trusted) ≥ 0.7 | `"high"` |
-| avg(final_score) ∈ [0.45, 0.7) | `"medium"` |
-| avg(final_score) < 0.45 or no trusted passages | `"low"` |
+|---|---|
+| Gate skipped retrieval | <code>medium</code> |
+| No selected passages | <code>low</code> |
+| Mean selected score at least 0.70 | <code>high</code> |
+| Mean selected score at least 0.45 | <code>medium</code> |
+| Lower mean selected score | <code>low</code> |
 
-> **Note:** Gating-skipped queries now receive `"medium"` (not `"high"`) because we cannot verify factuality without passages.
+## 5. Evaluation surfaces
 
-**Real provenance mapping (v0.3):** The `_build_provenance()` function uses the `details` list from `compute_factscore()` to build a real claim-to-passage mapping. For each supported claim, it records which passage(s) provided entailment. This replaces the mock provenance structure and enables provenance precision computation.
+The evaluation package provides normalized Exact Match and token F1, retrieval
+metrics, and an optional explicitly labelled lexical-support diagnostic. The
+standalone evaluate command defaults to no support metric.
 
-```python
-provenance = {
-    "0": ["doc_42"],   # Claim 0 supported by passage doc_42
-    "2": ["doc_17"],   # Claim 2 supported by passage doc_17
-    # Claim 1 was unsupported — absent from provenance
-}
-```
+<code>compute_nli_claim_support()</code> requires an explicit NLI callable and
+operates over the same regex-derived sentence-like units. It does not implement
+atomic-fact decomposition, and the batch evaluator does not report FactScore.
 
-**Config wiring (v0.3):** `nli_mode` and `cross_encoder_model` from YAML config are now passed through to the `PassageScorer` constructor in both `run_pipeline()` and `Pipeline.__init__()`.
+## 6. Durable experiment runs
 
-### 4.7 Evaluation & FactScore
+<code>experiment_runner</code> writes a new run beneath
+<code>runs/&lt;run-id&gt;/</code>. Before the query loop it:
 
-**Claim decomposition:** `decompose_claims(answer)` splits answer into atomic claims via regex sentence splitting (handles abbreviations like Mr., Dr., U.S., etc.).
+1. builds and fsyncs <code>resume_manifest.json</code>, binding the run identity,
+   inputs, effective settings, and source metadata;
+2. creates an empty <code>predictions.jsonl</code> checkpoint.
 
-**FactScore computation:** `compute_factscore(answer, passages, nli_fn)` performs real claim-level verification:
-1. Decompose answer into claims.
-2. For each claim, check NLI entailment against all passages.
-3. If any passage entails the claim (score > threshold), claim is supported.
-4. FactScore = `n_supported / n_claims`.
+Every completed prediction record is validated, serialized as strict finite
+JSON, appended with a newline, flushed, and fsynced. Resume mode validates the
+manifest against the current invocation, validates the complete checkpoint
+prefix in dataset order, and processes only the unfinished suffix. It may
+discard one final non-newline fragment as an uncommitted torn write; malformed
+newline-terminated records fail closed.
 
-Fallback: `compute_factscore_stub()` uses word-overlap proxy when no NLI function is available.
+After the query loop, the runner writes:
 
-### 4.8 Experiment Runner
+~~~text
+runs/<run-id>/
+├── resume_manifest.json
+├── predictions.jsonl
+├── metrics.json
+├── metadata.json
+├── references_by_example_id.json   # when references are available
+└── references.json                 # unambiguous-query compatibility map
+~~~
 
-Every run saves to `runs/<run-id>/`:
+The ordinary runner records structured research outputs; it does not by itself
+establish a benchmark result.
 
-```
-runs/20260228_145000_a1b2c3d4/
-├── predictions.jsonl   ← per-query: input, answer, passages, provenance
-├── metrics.json        ← aggregated EM, F1, FactScore stub
-└── metadata.json       ← timestamp, git commit, seed, lib versions, models
-```
+## 7. Effective configuration
 
----
+The package-distributed sample YAML supplies runtime defaults when no explicit
+path is provided. Explicit configuration paths are treated literally and fail
+if missing or malformed.
 
-## 5. Configuration Architecture
+| Parameter | Effective default |
+|---|---:|
+| <code>retriever.alpha</code> | 0.6 |
+| <code>retriever.top_k</code> | 10 |
+| <code>gating.entropy_thresh</code> | 1.2 |
+| <code>gating.logit_gap_thresh</code> | 2.0 |
+| <code>gating.probe_tokens</code> | 1 |
+| <code>gating.softmax_temperature</code> | 1.0 |
+| <code>scorer.score_threshold</code> | 0.4 |
+| <code>scorer.weights</code> | 0.5 / 0.2 / 0.3 |
+| <code>scorer.nli_mode</code> | <code>passage</code> |
+| <code>scorer.nli_batch_size</code> | 8 |
+| <code>scorer.cross_encoder_model</code> | <code>null</code> |
 
-All tunables live in `configs/exp_sample.yaml`:
+Generator decoding defaults remain code settings, as described in section 4.4.
 
-```yaml
-models:
-  dense_embedder: "sentence-transformers/all-mpnet-base-v2"   # 768-dim
-  nli_verifier: "ynie/roberta-large-snli_mnli_fever_anli_..."  # NLI
-  generator: "mistral-7b-instruct"                             # LLM
+## 8. Mock-mode boundary
 
-retriever:
-  alpha: 0.6          # dense weight in combined score
-  top_k: 10
+Mock mode avoids model-weight loading and GPU execution for direct pipeline
+queries:
 
-gating:
-  entropy_thresh: 1.2
-  logit_gap_thresh: 2.0
+| Component | Mock behavior |
+|---|---|
+| Index builder | Deterministic synthetic vectors |
+| Retriever | Deterministic dense and BM25 scores |
+| Gate | Deterministic synthetic logits |
+| Passage scorer | Deterministic NLI scores |
+| Generator | Deterministic query-labelled answer |
+| Model registry | Not called |
 
-scorer:
-  weights: {w_nli: 0.5, w_overlap: 0.2, w_ret: 0.3}
-  score_threshold: 0.4
-```
+The experiment runner can still load its selected dataset when mock mode is
+enabled unless that dataset is already cached. Mock execution is a development
+and test surface, not evidence about real-model quality or performance.
 
-Models, thresholds, and weights are all configurable without code changes.
+## 9. Artifact and scaling boundaries
 
----
+- Model checkpoints, corpus snapshots, generated indexes, and run directories
+  remain outside the source package.
+- Lucene index construction uses temporary output followed by final placement.
+  FAISS vectors and their ordered ID/text sidecars form one bound artifact set
+  and are validated together when loaded.
+- Source and run metadata record identities and content hashes where the
+  relevant API requires them.
+- No production throughput, latency, memory, deployment, or quality claim is
+  established by this architecture description.
 
-## 6. Mock Mode Architecture
-
-Mock mode is a first-class design concern, not an afterthought:
-
-```
-┌─────────────┐
-│  mock_mode?  │
-└──────┬──────┘
-       │
-  YES  │  NO
-  ▼    │  ▼
-┌──────────┐  ┌──────────────────┐
-│ np.random │  │ HF model.encode()│
-│ State(42) │  │ / .forward()     │
-│ → fixed   │  │ / pipeline()     │
-│ vectors   │  │ → real vectors   │
-└──────────┘  └──────────────────┘
-```
-
-**Guarantees:**
-- Deterministic outputs (same seed → same results).
-- No network calls (no HuggingFace Hub downloads).
-- No GPU required.
-- All 79 tests pass in < 15 seconds.
-
-**Where mock is applied:**
-
-| Component | Real Mode | Mock Mode |
-|-----------|-----------|-----------|
-| Index builder | SentenceTransformer → FAISS | `randn(N, 768)` → FAISS |
-| Retriever | FAISS search + Pyserini BM25 | FAISS search + random BM25 scores |
-| Gating probe | AutoModelForCausalLM forward | `randn(32000)` logits |
-| Passage scorer | NLI pipeline | `uniform(0.3, 0.95)` per passage |
-| Generator | text-generation pipeline | `f"Mock answer for query: {q}"` |
-| Model registry | model_registry calls | Returns `None` (skipped) |
-
----
-
-## 7. Technology Stack
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Dense retrieval | `sentence-transformers/all-mpnet-base-v2` + FAISS | Semantic search |
-| Sparse retrieval | Pyserini / Lucene BM25 | Keyword matching |
-| NLI scoring | `ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli` | Entailment detection |
-| Generation | Mistral-7B-Instruct-v0.3 (4-bit quant) | Answer production |
-| Index | FAISS IndexHNSWFlat (dev) / IndexIVFPQ (prod) | Vector similarity |
-| Data | HuggingFace Datasets API | Dataset loading |
-| Config | YAML (PyYAML) | Experiment configuration |
-| Testing | pytest | Unit & integration tests |
-| Packaging | pyproject.toml + setuptools | Distribution |
-
----
-
-## 8. Scaling Considerations
-
-### Current (dev / v0.1)
-- FAISS HNSW Flat — stores full vectors, O(log N) search.
-- Single-threaded, CPU-only.
-- 10-passage sample corpus for tests.
-
-### Production path
-- **FAISS IVFPQ** — quantised vectors, ~32× memory reduction.
-- **Sharded indexes** — split corpus across multiple FAISS shards.
-- **GPU encoding** — batch SentenceTransformer on GPU for indexing.
-- **Pyserini real BM25** — build Lucene index via `pyserini.index` CLI.
-- **Model parallelism** — 7B generator with `device_map="auto"` on multi-GPU.
-- **Batched inference** — process multiple queries simultaneously.
-
----
-
-## 9. Security & Reproducibility
-
-- **No proprietary APIs** — everything runs locally.
-- **Pinned seeds** — `seed=42` by default; configurable.
-- **Git commit tracking** — metadata includes `git rev-parse HEAD`.
-- **Library version tracking** — faiss, transformers, datasets versions logged.
-- **Config persistence** — full YAML config saved per run.
-- **Deterministic mock** — CI tests are independent of network and hardware.
+Possible future engineering work includes sparse-first execution, structured
+citations, verifier-assisted abstention, compressed or sharded indexes, and
+batched query processing. Each remains unimplemented until represented by code
+and independently reproducible artifacts.

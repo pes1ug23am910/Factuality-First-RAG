@@ -10,3 +10,4 @@ requirements/**/*.txt text eol=lf
 requirements/**/*.md text eol=lf
 requirements/**/*.toml text eol=lf
 *.sh text eol=lf
+*.md text eol=lf
